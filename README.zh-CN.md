@@ -76,7 +76,7 @@ python3 -m venv .venv
 
 - Manager 状态在 `manager.sqlite3`；任务包、输入和结果 bundle、Mac 上的结果仓库在 `manager.sqlite3.data/`。Runner 的 worktree、日志、计划和产出在 `--root` 目录。不要把这些运行数据提交到 Git。
 - 每个任务目前选择一台启动机器，Planner 能生成最多 8 个依赖步骤，在该机器顺序执行。跨机器分配与代码交接还没有接入。
-- 工作流依赖 `AgentProvider` / `AgentDriver` 接口，已实现多 Provider 统一适配：默认主力 Provider 为 `antigravity`（基于 Antigravity CLI/SDK，原生支持 `--json-schema` 结构化输出强约束、`--conversation` 原生断点续跑与规划/编辑模式隔离），同时内置 `codex` 与 `claude` 驱动。Task 选择 Agent，Run 和任务包保存 `agent_kind`，Runner 按类型实例化驱动。Planner、实现、独立评审与验收各有 Agent 会话；同一阶段需要补充信息时，Runner 保存会话 ID、问题和阶段进度，回答后由驱动续跑，已完成阶段不会重跑。Agent 评审和验收会附证据，最终合并仍由用户在 Web 中决定。
+- 工作流依赖 `AgentProvider` / `AgentDriver` 接口，已实现多 Provider 统一适配：默认主力 Provider 为 `antigravity`（基于 Antigravity CLI/SDK，原生支持 `--json-schema` 结构化输出强约束、`--conversation` 原生断点续跑与规划/编辑模式隔离）；轻量兜底 Provider 为 `pi`（派 Agent，采用原生 JSONL RPC 协议 `pi --mode rpc` 双向通信，摆脱脆性的 CLI 命令行文本抓取，具备原生流式事件捕获、Session 原生持久化与 `--tools` 细粒度只读沙箱）；同时支持 `codex` 与 `claude` 驱动。Task 选择 Agent，Run 和任务包保存 `agent_kind`，Runner 按类型实例化驱动。Planner、实现、独立评审与验收各有 Agent 会话；同一阶段需要补充信息时，Runner 保存会话 ID、问题和阶段进度，回答后由驱动续跑，已完成阶段不会重跑。Agent 评审和验收会附证据，最终合并仍由用户在 Web 中决定。
 - 规划、代码评审和验收的结构化输出由 Pydantic 模型生成 JSON Schema 并校验；步骤依赖无环、Gate 非空等业务规则仍由普通代码校验。本体 Planner 目前仍使用所选远端的 Codex，未来独立 Planner 的框架选择见[专项决策](docs/native-agent-framework.zh-CN.md)。
 - PR 自动创建/合并只支持 `github.com` 仓库；其他 Git remote 可以把成果带回 Mac 并保留分支。真实 GitHub PR 需要一个有写权限的项目，当前试验使用本地 Git 仓库，因此验收记录明确区分本地集成验证与外部仓库实测。
 - 本机仓库必须没有已跟踪或未跟踪的改动。Git bundle 输入上限 48 MiB。大型仓库可使用手工配置的远端已有目录；此时选择的是 Runner 上的代码，不会自动包含 Mac 的未提交内容。
