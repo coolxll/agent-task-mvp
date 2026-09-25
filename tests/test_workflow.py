@@ -190,6 +190,15 @@ class WorkflowTests(unittest.TestCase):
             self.api('/submit',{'project_id':self.project,'node_id':self.node,
                                 'agent_kind':'unknown','requirement':'Fix addition'})
 
+    def test_03b_unconfigured_manager_planner_persists_failure(self):
+        result = self.api('/submit', {'project_id':self.project,'node_id':self.node,
+            'agent_kind':'codex','planner':'manager','requirement':'Fix addition'})
+        self.assertEqual(result['status'], 'FAILED')
+        self.assertIn('MANAGER_PLANNER_MODEL', result['error'])
+        run = self.api('/runs/'+str(result['id']))
+        self.assertEqual(run['status'], 'FAILED')
+        self.assertEqual(run['error'], result['error'])
+
     def test_04_cancel_stops_agent_and_allows_cleanup(self):
         run_id=self.submit('Fix addition SLOW')
         self.wait(run_id,lambda r:r.get('stage')=='IMPLEMENTING_1')

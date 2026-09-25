@@ -172,10 +172,20 @@ def run(state, run_dir, workspace, driver, git, update, say, log, save):
             persist()
             raise
 
-    plan = agent('PLANNING', 'You are the planner. Read the repository before planning. Do not modify files. '
-        'Break the requirement into 1–8 concrete steps with dependencies, acceptance criteria and executable '
-        'test commands appropriate to this repository. All steps run sequentially on the selected machine. '
-        'Do not assume any other machine is available. Project gates: ' + json.dumps(state['gates']) + '\nRequirement:\n' + task, Plan, True)
+    manager_plan = state.get('package', {}).get('manager_plan')
+    if manager_plan:
+        plan = Plan.model_validate(manager_plan, strict=True).model_dump()
+        ordered_steps(plan)
+        if not any(x['name'] == 'PLANNING' for x in artifacts['stages']):
+            artifacts['stages'].append({'name': 'PLANNING', 'status': 'SUCCEEDED',
+                                        'source': 'manager', 'output': plan})
+            persist()
+        say('Using Manager Planner output')
+    else:
+        plan = agent('PLANNING', 'You are the planner. Read the repository before planning. Do not modify files. '
+            'Break the requirement into 1–8 concrete steps with dependencies, acceptance criteria and executable '
+            'test commands appropriate to this repository. All steps run sequentially on the selected machine. '
+            'Do not assume any other machine is available. Project gates: ' + json.dumps(state['gates']) + '\nRequirement:\n' + task, Plan, True)
     steps = ordered_steps(plan)
     artifacts['plan'] = plan
     persist()

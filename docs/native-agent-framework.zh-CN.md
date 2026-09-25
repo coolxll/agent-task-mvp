@@ -4,7 +4,7 @@
 
 ## 结论
 
-**下一步实现本体 Planner 时选 PydanticAI。** 当前运行路径仍使用远端 Codex 做规划；本轮只把计划、代码评审和验收的输出校验改为 Pydantic 模型，没有伪装成已经上线 PydanticAI Planner。当前 Manager 与 Runner 没有配置可供 PydanticAI / ADK 调用的模型 API 凭据；Codex CLI 的登录态不能直接视为模型 SDK 凭据。
+**本地主 Planner 已接入 PydanticAI，保持显式选择。** 默认运行路径仍使用远端 Coding Agent 做规划；Mac 尚无可供本地主 Planner 调用的模型 API 凭据，Codex CLI 登录态不能直接视为模型 SDK 凭据。模型真实端到端验收尚待配置模型服务后进行，见[验收记录](manager-planner-acceptance.zh-CN.md)。
 
 环境前提：当前 Mac Manager 的系统 Python 为 3.9；2026-09-25 从 PyPI 包元数据核对，`pydantic-ai` 与 `google-adk` 最新版本均要求 Python ≥3.10。实现本体 Planner 前需要把 Manager 运行环境升级到受支持的 Python，并配置可用的模型 API 或模型服务。
 
