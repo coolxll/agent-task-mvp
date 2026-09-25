@@ -687,6 +687,8 @@ def create_manager_app(db_path: Path) -> FastAPI:
             cur = con.execute("INSERT INTO tasks(project_id,title,description,acceptance_criteria,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (project["id"], title, requirement, "", "TODO", now(), now()))
             task_id = cur.lastrowid
+            # The model call may take minutes; release the SQLite write lock first.
+            con.commit()
             manager_plan = None
             if planner_mode == 'manager':
                 try:
