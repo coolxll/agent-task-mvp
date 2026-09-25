@@ -5,8 +5,30 @@ from pathlib import Path
 import subprocess
 
 from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from pipeline import Plan, ordered_steps
+
+PI_AGENT_CONFIG_DIR = Path.home() / '.pi' / 'agent'
+
+
+def resolve_model(name):
+    """Use Pi's existing OpenAI-compatible provider without copying its key."""
+    if not isinstance(name, str) or not name.startswith('pi:'):
+        return name
+    try:
+        provider_name, model_id = name[3:].split('/', 1)
+        provider = json.loads((PI_AGENT_CONFIG_DIR / 'models.json').read_text())['providers'][provider_name]
+        auth = json.loads((PI_AGENT_CONFIG_DIR / 'auth.json').read_text())[provider_name]
+        if provider['api'] != 'openai-completions':
+            raise ValueError('Pi provider is not OpenAI-compatible')
+        if model_id not in {model['id'] for model in provider['models']}:
+            raise ValueError('Model is not configured in Pi')
+        return OpenAIChatModel(model_id, provider=OpenAIProvider(
+            base_url=provider['baseUrl'], api_key=auth['key']))
+    except (KeyError, OSError, ValueError) as exc:
+        raise ValueError('Cannot resolve Pi model ' + name + ': ' + str(exc)) from exc
 
 
 async def plan_task(requirement, project, node, model_name=None):
@@ -14,7 +36,7 @@ async def plan_task(requirement, project, node, model_name=None):
     if not model_name:
         raise ValueError('Manager Planner needs MANAGER_PLANNER_MODEL and model credentials')
 
-    agent = Agent(model_name, output_type=Plan, system_prompt=(
+    agent = Agent(resolve_model(model_name), output_type=Plan, system_prompt=(
         'You are the Manager-side development task planner. Produce 1–8 concrete, '
         'dependency-ordered implementation steps and acceptance criteria. '
         'The selected Node executes all steps in one Git worktree. '

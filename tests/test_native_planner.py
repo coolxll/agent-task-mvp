@@ -1,5 +1,6 @@
 """The Manager planner uses PydanticAI and validates executable plans."""
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 import subprocess
@@ -9,10 +10,25 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
+import native_planner
 from native_planner import plan_task
+from unittest.mock import patch
 
 
 class NativePlannerTests(unittest.TestCase):
+    def test_pi_provider_config_is_reused_without_copying_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'models.json').write_text(json.dumps({'providers': {'test-pi': {
+                'api': 'openai-completions', 'baseUrl': 'http://127.0.0.1:9999/v1',
+                'models': [{'id': 'deepseek-flash'}]}}}))
+            (root / 'auth.json').write_text(json.dumps({'test-pi': {'type': 'api_key', 'key': 'fixture-secret'}}))
+            with patch.object(native_planner, 'PI_AGENT_CONFIG_DIR', root):
+                model = native_planner.resolve_model('pi:test-pi/deepseek-flash')
+                self.assertEqual(model.model_name, 'deepseek-flash')
+                with self.assertRaisesRegex(ValueError, 'not configured'):
+                    native_planner.resolve_model('pi:test-pi/missing')
+
     def test_typed_plan_with_repository_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
