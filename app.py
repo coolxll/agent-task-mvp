@@ -609,7 +609,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
             else:
                 cur = con.execute("INSERT INTO projects(name,source_path,repo_url,base_ref,gates,created_at,local_path,delivery) VALUES(?,?,?,?,?,?,?,?)",
                     (info["name"], "", info["repo_url"], info["base_ref"], "[]", now(), info["local_path"],
-                     "github" if git_io.github_repo(info["repo_url"]) else "branch"))
+                     "local"))
                 project_id = cur.lastrowid
             return {**info, "id": project_id}
 
@@ -619,10 +619,12 @@ def create_manager_app(db_path: Path) -> FastAPI:
         with closing(manager.db()) as con, con:
             project = manager.row(con, "projects", project_id)
             delivery = body.get("delivery", project["delivery"])
-            if delivery not in ("github", "branch"):
+            if delivery not in ("github", "branch", "local"):
                 raise ValueError("Invalid delivery method")
             if delivery == "github" and not git_io.github_repo(project["repo_url"]):
                 raise ValueError("GitHub delivery requires a github.com repository remote")
+            if delivery == "local" and not project["local_path"]:
+                raise ValueError("Local merge requires an imported Git folder on Manager")
             gates = body.get("gates", json.loads(project["gates"]))
             if not isinstance(gates, list) or not all(isinstance(x, str) and x.strip() for x in gates):
                 raise ValueError("Invalid gates")

@@ -1,4 +1,4 @@
-"""Manager-side task packages, local folders, and GitHub delivery."""
+"""Manager-side task packages, local folders, and reviewed delivery."""
 import json
 import agent_drivers
 import os
@@ -51,7 +51,7 @@ def route(manager, con, method, path):
         else:
             cur = con.execute('INSERT INTO projects(name,source_path,repo_url,base_ref,gates,created_at,local_path,delivery) VALUES(?,?,?,?,?,?,?,?)',
                 (info['name'], '', info['repo_url'], info['base_ref'], '[]', now(), info['local_path'],
-                 'github' if git_io.github_repo(info['repo_url']) else 'branch'))
+                 'local'))
             project_id = cur.lastrowid
         manager.reply(200, {**info, 'id': project_id})
         return True
@@ -61,10 +61,12 @@ def route(manager, con, method, path):
             project = manager.row(con, 'projects', int(parts[3]))
             body = manager.payload()
             delivery = body.get('delivery', project['delivery'])
-            if delivery not in ('github', 'branch'):
+            if delivery not in ('github', 'branch', 'local'):
                 raise ValueError('Invalid delivery method')
             if delivery == 'github' and not git_io.github_repo(project['repo_url']):
                 raise ValueError('GitHub delivery requires a github.com repository remote')
+            if delivery == 'local' and not project['local_path']:
+                raise ValueError('Local merge requires an imported Git folder on Manager')
             gates = body.get('gates', json.loads(project['gates']))
             if not isinstance(gates, list) or not all(isinstance(x, str) and x.strip() for x in gates):
                 raise ValueError('Invalid gates')
@@ -115,6 +117,8 @@ def start_run(manager, con, p):
     task = manager.row(con, 'tasks', p['task_id'])
     project = manager.row(con, 'projects', task['project_id'])
     git_io.validate_remote(project['repo_url'])
+    if project['delivery'] == 'local' and not project['local_path']:
+        raise ValueError('Local merge requires an imported Git folder on Manager')
     if task['status'] not in ('TODO', 'FAILED', 'REJECTED', 'CANCELLED'):
         raise ValueError('Task is not runnable')
     if p.get('workspace_id'):
@@ -159,6 +163,7 @@ def start_run(manager, con, p):
         if project['local_path']:
             info, bundle = git_io.snapshot(project['local_path'], root / 'input.bundle')
             package['source']['commit'] = info['base_sha']
+            package['source']['local_branch'] = info['branch']
             package['source']['bundle_sha256'] = bundle['sha256']
         atomic_json(root / 'package.json', package)
         con.execute('UPDATE runs SET package=? WHERE id=?', (json.dumps(package), run_id))
@@ -188,6 +193,42 @@ def start_run(manager, con, p):
 
 def gh(args, cwd=None):
     return git_io.command(['gh', *args], cwd=cwd)
+
+
+def merge_local_result(con, run, package, artifacts):
+    """Fast-forward only the exact clean branch submitted by the user."""
+    project = con.execute('SELECT p.local_path FROM projects p JOIN tasks t ON t.project_id=p.id '
+                          'WHERE t.id=?', (run['task_id'],)).fetchone()
+    if not project or not project['local_path']:
+        raise ValueError('The original local Git folder is no longer configured')
+    path = project['local_path']
+    info = git_io.inspect_repo(path)
+    branch = package['source'].get('local_branch')
+    base = package['source'].get('commit')
+    reviewed = artifacts['commit_sha']
+    if not branch or not base or base != artifacts['base_sha']:
+        raise ValueError('Task package has no valid local branch and base commit')
+    if info['branch'] != branch:
+        raise ValueError('The local project is on another branch; switch back before approval')
+    if info['base_sha'] == reviewed:
+        return  # A previous approval merged the reviewed commit before recording success.
+    if info['dirty']:
+        raise ValueError('The local project has uncommitted changes; approval did not modify it')
+    if info['base_sha'] != base:
+        raise ValueError('The local branch moved since task submission; review and integrate manually')
+    repo = run['delivery_repo']
+    if not repo or not Path(repo).is_dir():
+        raise ValueError('Reviewed result is not available on Manager')
+    branch_ref = 'refs/heads/' + artifacts['branch']
+    if git_io.git('rev-parse', branch_ref, cwd=repo) != reviewed:
+        raise ValueError('Reviewed result branch changed')
+    git_io.git('fetch', '--no-tags', repo, branch_ref, cwd=path)
+    if git_io.git('rev-parse', 'FETCH_HEAD', cwd=path) != reviewed:
+        raise ValueError('Fetched result differs from the reviewed commit')
+    # Git itself checks for concurrent local edits before updating the checkout.
+    git_io.git('merge', '--ff-only', 'FETCH_HEAD', cwd=path)
+    if git_io.git('rev-parse', 'HEAD', cwd=path) != reviewed:
+        raise ValueError('Local merge did not reach the reviewed commit')
 
 
 def publish(con, db_path, run_id, node):
@@ -259,7 +300,7 @@ def review_delivery(manager, con, run, node, payload):
         owner_repo = git_io.github_repo(package['source']['repo_url'])
         if payload['decision'] == 'reject':
             if run['delivery_status'] == 'merged':
-                raise ValueError('PR is already merged; retry approval to finish cleanup')
+                raise ValueError('Result is already merged; retry approval to finish cleanup')
             if run['pr_number']:
                 gh(['pr', 'close', str(run['pr_number']), '--repo', owner_repo])
             return
@@ -267,6 +308,13 @@ def review_delivery(manager, con, run, node, payload):
             raise ValueError('Code review, tests and acceptance must all pass')
         if run['delivery_status'] not in ('ready', 'merged'):
             raise ValueError('Result delivery is incomplete; retry delivery first')
+        if package['delivery'] == 'local' and run['delivery_status'] != 'merged':
+            state = runner_call(node, 'GET', '/runs/%s' % run['id'])
+            if state.get('commit_sha') != artifacts['commit_sha']:
+                raise ValueError('Runner result changed')
+            merge_local_result(con, run, package, artifacts)
+            con.execute("UPDATE runs SET delivery_status='merged',delivery_error=NULL WHERE id=?", (run['id'],))
+            con.commit()
         if package['delivery'] == 'github' and run['delivery_status'] != 'merged':
             if not run['pr_number']:
                 raise ValueError('PR has not been created')
