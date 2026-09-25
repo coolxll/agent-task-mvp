@@ -6,10 +6,31 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import agent_drivers
+import herdr_bridge
 from agent_drivers import HerdrDriver, PaseoDriver
 
 
 class HerdrAndPaseoDriverTests(unittest.TestCase):
+    def test_herdr_reads_only_marked_assistant_result(self):
+        capture = ('› Reply with TASK_RESULT_abc {"passed":false}\n'
+                   '• TASK_RESULT_abc {"passed":true,"summary":"ready"}\n'
+                   '› Ask Codex to do anything\n')
+        self.assertEqual(herdr_bridge.extract_assistant_response(capture, 'TASK_RESULT_abc'),
+                         '{"passed":true,"summary":"ready"}')
+        with self.assertRaisesRegex(ValueError, 'marked final response'):
+            herdr_bridge.extract_assistant_response(capture, 'TASK_RESULT_other')
+
+    def test_herdr_reassembles_terminal_wrapped_json(self):
+        capture = ('› TASK_RESULT_abc {"passed":false}\n'
+                   '• TASK_RESULT_abc {"passed": true, "summary":\n'
+                   '  "Implementation is correct; a test\n'
+                   '  exists."}\n\n'
+                   '› Ask Codex to do anything\n')
+        self.assertEqual(
+            herdr_bridge.extract_assistant_response(capture, 'TASK_RESULT_abc'),
+            '{"passed": true, "summary": "Implementation is correct; a test exists."}',
+        )
+
     def test_drivers_registered(self):
         kinds = agent_drivers.available_kinds()
         self.assertIn("herdr", kinds)

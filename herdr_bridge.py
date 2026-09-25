@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -22,7 +23,7 @@ def parse_args():
     parser.add_argument("--result-path", required=True, help="Path where final output will be written")
     parser.add_argument("--access", default="workspace", choices=["workspace", "full"], help="Permission level")
     parser.add_argument("--session-id", default=None, help="Existing session or pane handle if resuming")
-    parser.add_argument("--agent-kind", default="claude", help="Underlying agent kind inside herdr (claude, codex, etc.)")
+    parser.add_argument("--agent-kind", default="codex", help="Underlying agent kind inside herdr")
     parser.add_argument("--readonly", action="store_true", help="Read-only mode")
     parser.add_argument("--structured", action="store_true", help="Expect structured JSON output")
     parser.add_argument("--timeout", type=int, default=1800, help="Turn timeout in seconds")
@@ -43,10 +44,81 @@ def run_cmd(cmd, input_text=None, timeout=60):
     )
 
 
-def extract_assistant_response(text: str) -> str:
-    """Extract substantive assistant text from terminal screen capture."""
-    clean = text.strip()
-    return clean
+def cli_result(process):
+    if process.returncode:
+        raise RuntimeError(process.stderr.strip() or process.stdout.strip() or "Herdr command failed")
+    return json.loads(process.stdout)["result"]
+
+
+def extract_assistant_response(text: str, marker: str) -> str:
+    """Read the marked answer and its terminal-wrapped continuation lines."""
+    lines = text.splitlines()
+    answers = []
+    start = re.compile(r"^[ \t]*[•*][ \t]+" + re.escape(marker) + r"[ \t]+(.*)$")
+    for index, line in enumerate(lines):
+        match = start.match(line)
+        if not match:
+            continue
+        parts = [match.group(1).strip()]
+        for continuation in lines[index + 1:]:
+            if not continuation.strip() or not continuation.startswith("  "):
+                break
+            parts.append(continuation.strip())
+        answers.append(" ".join(parts))
+    if not answers:
+        raise ValueError("Herdr agent did not return a marked final response")
+    return answers[-1]
+
+
+def managed_repo_root(workspace):
+    """Return the source clone only for a Manager-owned worktree."""
+    if workspace.parent.name != "worktrees" or workspace.parent.parent.name != "data":
+        return None
+    git_dir = run_cmd(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute",
+                       "--git-common-dir"], timeout=10)
+    if git_dir.returncode:
+        return None
+    root = Path(git_dir.stdout.strip()).resolve().parent
+    repos = workspace.parent.parent / "repos"
+    return root if root.parent == repos and root.is_dir() else None
+
+
+def clear_safe_startup_dialogs(herdr, agent_name, pane_id, workspace, access):
+    """Dismiss known informational prompts; report when an update requires restart."""
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        screen = run_cmd([herdr, "agent", "read", agent_name,
+                          "--source", "visible", "--lines", "50"], timeout=15)
+        if screen.returncode and "agent_not_found" in screen.stderr:
+            pane = run_cmd([herdr, "pane", "read", pane_id,
+                            "--source", "visible", "--lines", "50"], timeout=15)
+            if pane.returncode == 0 and "Update ran successfully! Please restart Codex." in pane.stdout:
+                return True
+            raise RuntimeError("Herdr agent exited during startup: " + pane.stdout.strip())
+        if screen.returncode:
+            raise RuntimeError("Herdr agent read failed during startup: " + screen.stderr.strip())
+        text = screen.stdout
+        if "Hooks need review" in text and "Continue without trusting" in text:
+            cli_result(run_cmd([herdr, "agent", "send-keys", agent_name,
+                                "down", "down", "enter"], timeout=15))
+        elif "Update available!" in text and "Press enter to continue" in text:
+            cli_result(run_cmd([herdr, "agent", "send-keys", agent_name,
+                                "down", "enter"], timeout=15))
+        elif "Do you trust the contents of this directory?" in text:
+            root = managed_repo_root(workspace) if access == "full" else None
+            if not root or str(root) not in text or "1. Yes, continue" not in text:
+                raise RuntimeError("Codex requested trust for an unverified repository")
+            cli_result(run_cmd([herdr, "agent", "send-keys", agent_name, "enter"], timeout=15))
+        elif "Ask Codex to do anything" in text:
+            return False
+        elif "Updating Codex via `npm install -g @openai/codex`" in text:
+            # Codex may update itself after Herdr has already recognized it.
+            time.sleep(1)
+        elif not text.strip():
+            time.sleep(.5)
+        else:
+            raise RuntimeError("Herdr agent is waiting at an unknown startup prompt")
+    raise RuntimeError("Herdr agent did not reach its ready prompt within 120 seconds")
 
 
 def main():
@@ -57,13 +129,15 @@ def main():
     prompt = prompt_path.read_text(encoding="utf-8")
 
     herdr = get_herdr_bin()
+    workspace_id = None
     pane_id = None
+    paused = False
     agent_name = f"run_{int(time.time())}_{os.getpid()}"
 
     def cleanup_handler(signum=None, frame=None):
-        if pane_id:
+        if workspace_id and not paused:
             try:
-                run_cmd([herdr, "pane", "close", pane_id], timeout=5)
+                run_cmd([herdr, "workspace", "close", workspace_id], timeout=10)
             except Exception:
                 pass
         if signum is not None:
@@ -81,36 +155,25 @@ def main():
             result_path.write_text(error_msg)
             return 1
 
-        # 2. Split a new pane in the background
-        split_res = run_cmd([
-            herdr, "pane", "split",
-            "--cwd", str(workspace),
-            "--direction", "right",
-            "--no-focus"
-        ], timeout=15)
-        if split_res.returncode != 0:
-            err = split_res.stderr.strip() or split_res.stdout.strip()
-            print(f"[herdr.error] Failed to split pane: {err}", flush=True)
-            result_path.write_text(f"Failed to split Herdr pane: {err}")
-            return 1
-
-        try:
-            split_data = json.loads(split_res.stdout)
-            pane_id = split_data.get("result", {}).get("pane", {}).get("pane_id")
-        except Exception as e:
-            print(f"[herdr.error] Failed to parse pane split response: {e}", flush=True)
-            result_path.write_text(f"Invalid Herdr JSON response: {split_res.stdout}")
-            return 1
-
-        if not pane_id:
-            print(f"[herdr.error] No pane_id returned by Herdr split", flush=True)
-            return 1
+        # Every Run stage gets its own workspace. Never split the user's focused pane.
+        if args.session_id:
+            pane_id = args.session_id
+            existing = cli_result(run_cmd([herdr, "agent", "get", pane_id], timeout=15))["agent"]
+            if Path(existing["cwd"]).resolve() != workspace:
+                raise ValueError("Herdr session belongs to another worktree")
+            workspace_id = existing["workspace_id"]
+            agent_name = existing["name"]
+        else:
+            created = cli_result(run_cmd([herdr, "workspace", "create", "--cwd", str(workspace),
+                                          "--label", agent_name, "--no-focus"], timeout=20))
+            workspace_id = created["workspace"]["workspace_id"]
+            pane_id = created["root_pane"]["pane_id"]
 
         print(f"[herdr.session] {pane_id}", flush=True)
-        print(f"[herdr.info] Allocated Herdr pane {pane_id} in {workspace}", flush=True)
+        print(f"[herdr.info] Allocated Herdr workspace {workspace_id}, pane {pane_id}", flush=True)
 
         # 3. Start coding agent inside the allocated pane
-        agent_kind = args.agent_kind or os.environ.get("HERDR_AGENT_KIND", "claude")
+        agent_kind = args.agent_kind or os.environ.get("HERDR_AGENT_KIND", "codex")
         start_cmd = [herdr, "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id]
 
         # Pass native bypass flags if full access requested
@@ -123,35 +186,53 @@ def main():
             elif agent_kind == "agy":
                 extra_args = ["--", "--dangerously-skip-permissions"]
 
-        start_cmd.extend(extra_args)
-        start_res = run_cmd(start_cmd, timeout=30)
-        if start_res.returncode != 0:
-            err = start_res.stderr.strip() or start_res.stdout.strip()
-            print(f"[herdr.error] herdr agent start failed: {err}", flush=True)
-            result_path.write_text(f"Agent startup failed in pane {pane_id}: {err}")
-            return 1
+        if not args.session_id:
+            start_cmd.extend(extra_args)
+            for restart in range(2):
+                start_res = run_cmd(start_cmd, timeout=35)
+                if start_res.returncode:
+                    error = start_res.stderr.strip() or start_res.stdout.strip()
+                    if "agent_not_ready" not in error or agent_kind != "codex":
+                        raise RuntimeError("Herdr agent startup failed: " + error)
+                if agent_kind != "codex" or not clear_safe_startup_dialogs(herdr, agent_name, pane_id, workspace, args.access):
+                    break
+                if restart:
+                    raise RuntimeError("Codex requested another restart after updating")
 
         print(f"[herdr.agent] Started {agent_kind} agent '{agent_name}' in pane {pane_id}", flush=True)
 
         # 4. Prompt agent and wait for completion
         timeout_ms = str(max(10, args.timeout) * 1000)
-        prompt_res = run_cmd([
-            herdr, "agent", "prompt", agent_name, prompt,
-            "--wait", "--timeout", timeout_ms
-        ], timeout=args.timeout + 15)
+        marker = "TASK_RESULT_" + secrets.token_hex(8)
+        prompt += ("\nFinal response contract: reply in exactly ONE line beginning with " + marker +
+                   " followed by your final answer. If a JSON schema was requested, put the complete compact "
+                   "JSON object on that same line. If you need input, put NEEDS_INPUT: <question> after the marker. "
+                   "Do not include Markdown fences or any other final text.")
+        for attempt in range(4):
+            prompt_res = run_cmd([herdr, "agent", "prompt", agent_name, prompt,
+                                  "--wait", "--timeout", timeout_ms], timeout=args.timeout + 15)
+            if not prompt_res.returncode:
+                break
+            if "agent_blocked" not in (prompt_res.stderr + prompt_res.stdout) or agent_kind != "codex" or attempt == 3:
+                break
+            # Herdr may report readiness between successive Codex startup dialogs.
+            time.sleep(.5)
+            clear_safe_startup_dialogs(herdr, agent_name, pane_id, workspace, args.access)
 
-        if prompt_res.returncode != 0:
-            err = prompt_res.stderr.strip() or prompt_res.stdout.strip()
-            print(f"[herdr.warning] herdr agent prompt exited with code {prompt_res.returncode}: {err}", flush=True)
+        if prompt_res.returncode:
+            raise RuntimeError("Herdr agent prompt failed: " +
+                               (prompt_res.stderr.strip() or prompt_res.stdout.strip()))
 
         # 5. Read output from agent
         read_res = run_cmd([
             herdr, "agent", "read", agent_name,
             "--source", "recent-unwrapped", "--lines", "300"
         ], timeout=15)
-        raw_output = read_res.stdout if read_res.returncode == 0 else (read_res.stderr or "")
-
-        final_text = extract_assistant_response(raw_output)
+        if read_res.returncode:
+            raise RuntimeError("Herdr agent read failed: " +
+                               (read_res.stderr.strip() or read_res.stdout.strip()))
+        final_text = extract_assistant_response(read_res.stdout, marker)
+        paused = final_text.startswith("NEEDS_INPUT:")
         result_path.write_text(final_text, encoding="utf-8")
         print(f"[herdr.done] Agent turn finished in pane {pane_id} ({len(final_text)} chars)", flush=True)
         return 0

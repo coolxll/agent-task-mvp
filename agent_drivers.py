@@ -480,7 +480,7 @@ class HerdrDriver:
             command.append('--readonly')
         if schema:
             command.append('--structured')
-        agent_kind = os.environ.get("HERDR_AGENT_KIND", "claude")
+        agent_kind = os.environ.get("HERDR_AGENT_KIND", "codex")
         command.extend(['--agent-kind', agent_kind])
 
         proc = subprocess.Popen(
