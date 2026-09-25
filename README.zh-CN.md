@@ -4,6 +4,8 @@
 
 [实施计划与差距](docs/implementation-plan.zh-CN.md) · [逐项验收记录](docs/acceptance.zh-CN.md) · [任务看板验收](docs/kanban-board-acceptance.zh-CN.md) · [Herdr 运行驱动验收](docs/herdr-runner-acceptance.zh-CN.md) · [本机网页合并验收](docs/local-web-merge-acceptance.zh-CN.md) · [交互协议演进 (ACP)](docs/acp-agent-protocol.zh-CN.md) · [ACP 开源实现对照](docs/acp-open-source-comparison.zh-CN.md) · [本体 Agent 框架选择](docs/native-agent-framework.zh-CN.md) · [目标产品定义](docs/target-mvp.zh-CN.md)
 
+[wujie 开发工作区验收](docs/wujie-workspace-acceptance.zh-CN.md)
+
 
 ## 快速体验
 
