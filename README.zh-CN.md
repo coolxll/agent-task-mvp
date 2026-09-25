@@ -2,11 +2,11 @@
 
 从 Mac 的网页选择一个 Git 工作目录和远端机器，在一个大文本框里描述需求。Manager 把当前已提交版本封装成任务包送往 Runner；远端 Coding Agent 调查仓库、拆解步骤、实现、独立评审、运行测试并生成验收报告。结果以 Git bundle 回到 Mac。用户在网页查看 diff、测试与评审结果后，可将已审核提交合并到所选本机目录；GitHub PR 是另一种可选交付方式。
 
-[实施计划与差距](docs/implementation-plan.zh-CN.md) · [逐项验收记录](docs/acceptance.zh-CN.md) · [本机网页合并验收](docs/local-web-merge-acceptance.zh-CN.md) · [交互协议演进 (ACP)](docs/acp-agent-protocol.zh-CN.md) · [本体 Agent 框架选择](docs/native-agent-framework.zh-CN.md) · [目标产品定义](docs/target-mvp.zh-CN.md)
+[实施计划与差距](docs/implementation-plan.zh-CN.md) · [逐项验收记录](docs/acceptance.zh-CN.md) · [任务看板验收](docs/kanban-board-acceptance.zh-CN.md) · [本机网页合并验收](docs/local-web-merge-acceptance.zh-CN.md) · [交互协议演进 (ACP)](docs/acp-agent-protocol.zh-CN.md) · [本体 Agent 框架选择](docs/native-agent-framework.zh-CN.md) · [目标产品定义](docs/target-mvp.zh-CN.md)
 
 ## 快速体验
 
-1. 确保本机 Manager、到 `corp172-dev` 的 SSH 转发和远端 Runner 在运行。打开中文版 <http://127.0.0.1:18765/zh>。
+1. 确保本机 Manager、到 `corp172-dev` 的 SSH 转发和远端 Runner 在运行。打开中文版 <http://127.0.0.1:18765/zh>，默认进入 **TODOs 风格任务看板**（涵盖待办、执行中、等待补充信息、待交付验收、已完成五列）。
 2. 在“任务”点击“选择文件夹…”，选一个 **已提交且干净的 Git 仓库**。系统读取路径、Git remote、当前提交与默认分支并创建或复用 Project。原有 Project 也可在下拉框选择。
 3. 选择 `corp172-dev`，在“描述你想完成的需求”写下目标和限制，点击“创建并运行”。标题、验收条件、步骤和测试建议由 Agent 从需求中提取。
    “规划位置”默认选择远端。要复用 Mac 上 Pi 已配置的 DeepSeek Flash，启动 Manager 前设置 `MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash`，再显式选择本地规划；程序从 `~/.pi/agent/` 读取服务地址与凭据，不复制密钥。计划会随任务包保存，模型错误也会保存为失败 Run。详情见[本地主 Agent 验收](docs/manager-planner-acceptance.zh-CN.md)。
