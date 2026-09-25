@@ -10,7 +10,9 @@ Manager 只会将提交任务时选中的本机分支快进到**已审核的准�
 
 - 隔离集成测试经 Manager API 提交任务、等待远端 Runner 完成、确认选中目录在网页批准前保持原提交、批准后 HEAD 等于已审核提交、文件内容更新且工作树干净；远端 worktree 清理，Run 交付状态为 `merged`。
 - 另一隔离测试在 Review 时先向本机分支增加提交，验证网页批准被拒绝，本机 HEAD 保持新提交，Run 保持 `REVIEW`，随后可拒绝并清理远端 worktree。
-- 该交付方式尚未在用户的真实项目目录上执行批准；首次使用应先选择一个可丢弃的测试仓库。
+- 真实远端验收：在 `/tmp/agent-task-local-merge-qa-20260925` 建立一次性 Git 仓库，Manager 使用 Pi 配置的 DeepSeek Flash 规划，`corp172-dev` 的 ACP Runner 实现修复、独立评审并运行 `python3 -m unittest -v`（退出码 0）。Run #13 到 `REVIEW` 后，Manager 收到的 diff 仅将 `calculator.py` 中的 `return a - b` 改为 `return a + b`；本机目录仍停在基准提交 `85ea8c1`。调用网页批准按钮所用的同一 `/api/runs/13/review` 接口后，Run 为 `SUCCEEDED`、交付为 `merged`，本机 HEAD 精确等于已审核提交 `729a752`，工作树干净且远端 worktree 已清理。
+- 首次真实试跑 Run #12 在 Agent 评审运行 unittest 后，因测试仓库未忽略 `__pycache__` 而触发只读阶段文件指纹保护，明确失败并清理。给一次性仓库补充 `.gitignore` 后，Run #13 通过。该保护要求项目正确忽略测试生成文件。
+- 本次真实任务的最终批准通过与网页按钮相同的 Manager API 完成；浏览器自动化入口不可用，未再次做按钮点击的视觉验收。没有对用户的实际项目目录执行合并。
 
 ## 运行环境
 
