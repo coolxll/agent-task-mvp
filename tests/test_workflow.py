@@ -95,6 +95,7 @@ class WorkflowTests(unittest.TestCase):
         else: raise AssertionError('Manager failed to start')
         cls.node = cls.api('/nodes', {'name':'fixture','endpoint':'http://127.0.0.1:'+str(cls.runner_port),'token':'test-secret'})['id']
         cls.project = cls.api('/projects/import', {'path':str(cls.repo)})['id']
+        cls.api('/projects/%s/settings'%cls.project, {'delivery':'branch'})
 
     @classmethod
     def tearDownClass(cls):
@@ -151,6 +152,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['status'],'SUCCEEDED')
         self.assertFalse(Path(run['workspace']).exists())
         self.assertTrue(Path(run['delivery_repo']).exists())
+
+    def test_01a_web_approval_fast_forwards_selected_local_folder(self):
+        source = self.root / 'local-merge-source'
+        git_io.git('clone', '--no-hardlinks', str(self.repo), str(source), cwd=self.root)
+        project = self.api('/projects/import', {'path':str(source)})['id']
+        project_row = next(x for x in self.api('/projects') if x['id'] == project)
+        self.assertEqual(project_row['delivery'], 'local')
+        base = git_io.git('rev-parse', 'HEAD', cwd=source)
+        run_id = self.api('/submit', {'project_id':project,'node_id':self.node,
+                                     'agent_kind':'codex','requirement':'Fix addition locally'})['id']
+        run = self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['status'], 'REVIEW', run)
+        self.assertEqual(run['delivery_status'], 'ready', run)
+        self.assertEqual(git_io.git('rev-parse', 'HEAD', cwd=source), base)
+        reviewed = run['artifacts']['commit_sha']
+        self.api('/runs/%s/review'%run_id, {'decision':'approve'})
+        self.assertEqual(git_io.git('rev-parse', 'HEAD', cwd=source), reviewed)
+        self.assertEqual(git_io.git('status', '--porcelain', cwd=source), '')
+        self.assertIn('return a + b', (source / 'calculator.py').read_text())
+        self.assertFalse(Path(run['workspace']).exists())
+        self.assertEqual(self.api('/runs/%s'%run_id)['delivery_status'], 'merged')
+
+    def test_01b_local_merge_rejects_moved_source_branch(self):
+        source = self.root / 'local-moved-source'
+        git_io.git('clone', '--no-hardlinks', str(self.repo), str(source), cwd=self.root)
+        project = self.api('/projects/import', {'path':str(source)})['id']
+        run_id = self.api('/submit', {'project_id':project,'node_id':self.node,
+                                     'agent_kind':'codex','requirement':'Fix addition locally'})['id']
+        run = self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['delivery_status'], 'ready', run)
+        (source / 'local-note.txt').write_text('new local commit\n')
+        git_io.git('add', 'local-note.txt', cwd=source)
+        git_io.git('-c', 'user.name=Test', '-c', 'user.email=test@local',
+                   'commit', '-m', 'local progress', cwd=source)
+        new_head = git_io.git('rev-parse', 'HEAD', cwd=source)
+        with self.assertRaisesRegex(ValueError, 'local branch moved'):
+            self.api('/runs/%s/review'%run_id, {'decision':'approve'})
+        self.assertEqual(git_io.git('rev-parse', 'HEAD', cwd=source), new_head)
+        self.assertEqual(self.api('/runs/%s'%run_id)['status'], 'REVIEW')
+        self.api('/runs/%s/review'%run_id, {'decision':'reject'})
 
     def test_02_failed_gate_blocks_approval_but_keeps_results(self):
         run_id=self.submit('Fix addition FAIL_GATE')

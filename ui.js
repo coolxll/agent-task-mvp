@@ -55,13 +55,13 @@ Object.assign(labels.en, {
   taskHelp:'Choose a folder and machine, then describe your goal. The remote agent plans, implements, reviews and tests it.',
   needSetup:'Add a Node in Setup, then choose a Git folder or an existing Project.',
   plan:'Execution plan', codeReview:'Code review', acceptance:'Acceptance report', package:'Task package',
-  delivery:'Delivery', deliveryBranch:'Keep branch on Manager', deliveryGithub:'Create GitHub PR and merge after approval',
-  save:'Save settings', retryDelivery:'Retry delivery', approveMerge:'Approve and merge PR',
+  delivery:'Delivery', deliveryLocal:'Merge into selected local folder after approval', deliveryBranch:'Keep branch on Manager', deliveryGithub:'Create GitHub PR and merge after approval',
+  save:'Save settings', retryDelivery:'Retry delivery', approveMerge:'Approve and merge PR', approveLocal:'Approve and merge locally',
   imported:'Folder selected', dirty:'Uncommitted changes: commit them before submitting.',
   stages:'Execution stages', returned:'Result repository on Manager', passed:'Passed', blocked:'Needs changes',
   choose:'Use this folder', up:'Parent folder', close:'Close', open:'Open',
   question:'The agent needs your input to continue', answer:'Send answer and continue',
-  acceptanceHelp:'Code review and tests are part of the remote workflow. Your acceptance confirms the delivered result. For GitHub projects it merges the PR; otherwise it keeps the result branch on this Mac. Rejection closes the PR, if any, and cleans the remote worktree.',
+  acceptanceHelp:'Code review and tests run remotely. Approval merges the reviewed commit into the selected clean local folder, merges a GitHub PR, or keeps a result branch, according to project settings. Rejection closes any PR and cleans the remote worktree.',
 });
 Object.assign(labels.zh, {
   eventTimeline:'执行事件',
@@ -70,13 +70,13 @@ Object.assign(labels.zh, {
   taskHelp:'选择目录和机器，写下目标。远端 Agent 会规划、实现、评审、测试并生成验收报告。',
   needSetup:'请在配置页添加节点，然后选择一个 Git 文件夹或已有项目。',
   plan:'执行计划', codeReview:'代码评审', acceptance:'验收报告', package:'任务包',
-  delivery:'交付方式', deliveryBranch:'取回 Mac 并保留分支', deliveryGithub:'创建 GitHub PR，验收后合并',
-  save:'保存设置', retryDelivery:'重试交付', approveMerge:'验收通过并合并 PR',
+  delivery:'交付方式', deliveryLocal:'验收后合并到所选本机目录', deliveryBranch:'取回 Mac 并保留分支', deliveryGithub:'创建 GitHub PR，验收后合并',
+  save:'保存设置', retryDelivery:'重试交付', approveMerge:'验收通过并合并 PR', approveLocal:'验收通过并合并到本机',
   imported:'已选择目录', dirty:'目录有未提交改动：提交后才能运行。',
   stages:'执行阶段', returned:'Manager 上的结果仓库', passed:'通过', blocked:'需要修改',
   choose:'使用此文件夹', up:'上级目录', close:'关闭', open:'打开',
   question:'Agent 需要你补充信息才能继续', answer:'发送回答并继续执行',
-  acceptanceHelp:'代码评审和测试由远端工作流自动完成。这里的交付验收由你决定：GitHub 项目通过后合并 PR；其他项目保留已回传 Mac 的结果分支。拒绝会关闭已有 PR 并清理远端工作区。',
+  acceptanceHelp:'代码评审和测试由远端工作流自动完成。这里由你决定是否接受成果：根据项目交付方式，合并到所选本机目录、合并 GitHub PR，或保留 Manager 结果分支。拒绝会关闭已有 PR 并清理远端工作区。',
 });
 const L = labels[zh ? 'zh' : 'en'];
 const t = key => L[key] || key;
@@ -150,7 +150,7 @@ function renderSetup(app, {projects, nodes, workspaces}) {
     <section><h2>${t('projects')}</h2><p class="muted">${t('projectHelp')}</p>
       <table><tbody>${projects.map(x => `<tr><td>${esc(x.name)}</td><td>${esc(x.repo_url || x.source_path)}</td><td>${esc(x.base_ref)}</td></tr>`).join('')}</tbody></table>
       ${projects.map(x => `<details><summary>${esc(x.name)} · ${t('delivery')}</summary><form data-project-settings="${x.id}">
-        <label>${t('delivery')}<select name="delivery"><option value="branch" ${x.delivery === 'branch' ? 'selected' : ''}>${t('deliveryBranch')}</option><option value="github" ${x.delivery === 'github' ? 'selected' : ''}>${t('deliveryGithub')}</option></select></label>
+        <label>${t('delivery')}<select name="delivery">${x.local_path ? `<option value="local" ${x.delivery === 'local' ? 'selected' : ''}>${t('deliveryLocal')}</option>` : ''}<option value="branch" ${x.delivery === 'branch' ? 'selected' : ''}>${t('deliveryBranch')}</option><option value="github" ${x.delivery === 'github' ? 'selected' : ''}>${t('deliveryGithub')}</option></select></label>
         <label>${t('baseRef')}<input name="base_ref" value="${esc(x.base_ref)}" required></label>
         <label>${t('gates')}<textarea name="gates">${esc((x.gates || []).join('\n'))}</textarea></label>
         <button>${t('save')}</button></form></details>`).join('')}
@@ -340,7 +340,7 @@ async function details(id) {
     <h3>${t('diff')}</h3><pre>${esc(art.diff)}</pre>
     <h3>${t('eventTimeline')}</h3><div id="event-timeline">${events.filter(x => x.kind === 'status' || x.kind === 'agent').slice(-80).map(eventLine).join('')}</div>
     <h3>${t('logs')}</h3><pre id="log-view">${esc(logs.text)}</pre>
-    ${run.status === 'REVIEW' ? `<button id="approve" ${ready ? '' : 'disabled'}>${pkg.delivery === 'github' ? t('approveMerge') : t('approve')}</button><button id="reject">${t('reject')}</button>` : ''}`;
+    ${run.status === 'REVIEW' ? `<button id="approve" ${ready ? '' : 'disabled'}>${pkg.delivery === 'github' ? t('approveMerge') : pkg.delivery === 'local' ? t('approveLocal') : t('approve')}</button><button id="reject">${t('reject')}</button>` : ''}`;
   const retry = document.getElementById('retry-delivery');
   const answerForm = document.getElementById('answer-form');
   if (answerForm) answerForm.onsubmit = async event => {
