@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Manager and remote Runner for agent-driven Git worktree tasks."""
 import argparse
+import asyncio
 import datetime as dt
 import fcntl
 import json
@@ -22,7 +23,7 @@ from urllib.parse import urlparse
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import agent_drivers
@@ -433,7 +434,38 @@ CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, task_id INTEGER NOT NUL
  error TEXT, workspace TEXT, source_path TEXT, branch TEXT, commit_sha TEXT, agent_session_id TEXT, question TEXT,
  started_at TEXT, finished_at TEXT, cleaned_at TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, artifacts TEXT NOT NULL DEFAULT '{}', logs TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS run_events (id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+ kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS run_events_run_id_id ON run_events(run_id,id);
 """
+
+
+def append_run_event(con, run_id, kind, data):
+    con.execute('INSERT INTO run_events(run_id,kind,data,created_at) VALUES(?,?,?,?)',
+                (run_id, kind, json.dumps(data, ensure_ascii=False), now()))
+
+
+def capture_run_events(con, run_id, old_status, old_stage, state, logs):
+    if state['status'] != old_status or state.get('stage') != old_stage:
+        append_run_event(con, run_id, 'status', {'status': state['status'],
+            'stage': state.get('stage'), 'error': state.get('error'), 'question': state.get('question')})
+    cursor = con.execute('SELECT event_log_offset FROM runs WHERE id=?', (run_id,)).fetchone()[0]
+    if cursor > len(logs):
+        cursor = 0
+        append_run_event(con, run_id, 'log_reset', {})
+    tail = logs[cursor:]
+    complete = tail.rfind('\n') + 1
+    for line in tail[:complete].splitlines():
+        if line.startswith('[acp.event] '):
+            try:
+                event = json.loads(line[len('[acp.event] '):])
+                event['raw'] = line + '\n'
+                append_run_event(con, run_id, 'agent', event)
+                continue
+            except ValueError:
+                pass
+        append_run_event(con, run_id, 'log', {'text': line + '\n'})
+    con.execute('UPDATE runs SET event_log_offset=? WHERE id=?', (cursor + complete, run_id))
 
 
 def runner_call(node, method, path, payload=None, timeout=10):
@@ -699,6 +731,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
                     failed = con.execute('INSERT INTO runs(task_id,node_id,agent_kind,status,error,created_at,updated_at) '
                         'VALUES(?,?,?,?,?,?,?)', (task_id, node['id'], p.get('agent_kind', agent_drivers.default_kind()),
                                                   'FAILED', error, now(), now()))
+                    append_run_event(con, failed.lastrowid, 'status', {'status': 'FAILED', 'error': error})
                     con.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE id=?", (now(), task_id))
                     return {'id': failed.lastrowid, 'task_id': task_id, 'status': 'FAILED', 'error': error}
             result = control.start_run(manager, con, {"task_id": task_id, "node_id": p["node_id"],
@@ -734,6 +767,49 @@ def create_manager_app(db_path: Path) -> FastAPI:
             run = manager.row(con, "runs", run_id)
             return {"text": run["logs"]}
 
+    @app.get('/api/runs/{run_id}/events')
+    def get_run_events(run_id: int, after: int = 0):
+        with closing(manager.db()) as con:
+            manager.row(con, 'runs', run_id)
+            if after:
+                rows = con.execute('SELECT id,kind,data,created_at FROM run_events '
+                    'WHERE run_id=? AND id>? ORDER BY id LIMIT 1000', (run_id, max(0, after))).fetchall()
+            else:
+                rows = list(reversed(con.execute('SELECT id,kind,data,created_at FROM run_events '
+                    'WHERE run_id=? ORDER BY id DESC LIMIT 1000', (run_id,)).fetchall()))
+            return [{'id': row['id'], 'kind': row['kind'], 'data': json.loads(row['data']),
+                     'created_at': row['created_at']} for row in rows]
+
+    @app.get('/api/runs/{run_id}/stream')
+    async def stream_run_events(run_id: int, request: Request, after: int = 0):
+        with closing(manager.db()) as con:
+            manager.row(con, 'runs', run_id)
+        cursor = max(0, after, int(request.headers.get('last-event-id') or 0))
+
+        async def events():
+            nonlocal cursor
+            idle = 0
+            while not await request.is_disconnected():
+                with closing(manager.db()) as con:
+                    rows = con.execute('SELECT id,kind,data,created_at FROM run_events '
+                        'WHERE run_id=? AND id>? ORDER BY id LIMIT 100', (run_id, cursor)).fetchall()
+                if rows:
+                    idle = 0
+                    for row in rows:
+                        cursor = row['id']
+                        payload = {'id': cursor, 'kind': row['kind'],
+                                   'data': json.loads(row['data']), 'created_at': row['created_at']}
+                        yield 'id: %s\ndata: %s\n\n' % (cursor, json.dumps(payload, ensure_ascii=False))
+                else:
+                    idle += 1
+                    if idle >= 30:
+                        yield ': keepalive\n\n'
+                        idle = 0
+                    await asyncio.sleep(.5)
+
+        return StreamingResponse(events(), media_type='text/event-stream',
+                                 headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
     @app.get("/api/runs/{run_id}/artifacts")
     def get_run_artifacts(run_id: int):
         with closing(manager.db()) as con:
@@ -767,6 +843,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
             con.execute("UPDATE runs SET status=?,question=NULL,updated_at=? WHERE id=?",
                         (state["status"], now(), run_id))
             con.execute("UPDATE tasks SET status='RUNNING',updated_at=? WHERE id=?", (now(), run["task_id"]))
+            append_run_event(con, run_id, 'status', {'status': state['status'], 'stage': state.get('stage')})
             return state
 
     @app.post("/api/runs/{run_id}/cancel")
@@ -779,6 +856,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
                 (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
             task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
             con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            append_run_event(con, run_id, 'status', {'status': state['status'], 'stage': state.get('stage')})
             return state
 
     @app.post("/api/runs/{run_id}/cleanup")
@@ -791,6 +869,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
                 (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
             task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
             con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            append_run_event(con, run_id, 'status', {'status': state['status'], 'stage': state.get('stage')})
             return state
 
     @app.post("/api/runs/{run_id}/review")
@@ -805,6 +884,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
                 (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
             task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
             con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            append_run_event(con, run_id, 'status', {'status': state['status'], 'stage': state.get('stage')})
             return state
 
     return app
@@ -822,13 +902,14 @@ def poll(db_path):
                     logs = runner_call(row, "GET", "/runs/%s/logs" % row["id"])["text"]
                     artifacts = runner_call(row, "GET", "/runs/%s/artifacts" % row["id"])
                     with con:
-                        current = con.execute("SELECT status FROM runs WHERE id=?", (row["id"],)).fetchone()
+                        current = con.execute("SELECT status,stage FROM runs WHERE id=?", (row["id"],)).fetchone()
                         if current["status"] in ("SUCCEEDED", "REJECTED", "CANCELLED"):
                             continue
                         con.execute("UPDATE runs SET status=?,error=?,workspace=?,source_path=?,branch=?,agent_session_id=?,started_at=?,finished_at=?,artifacts=?,logs=?,updated_at=?,stage=?,commit_sha=?,question=? WHERE id=?",
                             (state["status"], state.get("error"), state.get("workspace"), state.get("source_path"), state.get("branch"),
                              state.get("agent_session_id"), state.get("started_at"), state.get("finished_at"),
                              json.dumps(artifacts), logs, now(), state.get("stage"), state.get("commit_sha"), state.get("question"), row["id"]))
+                        capture_run_events(con, row['id'], current['status'], current['stage'], state, logs)
                         if row["workspace_id"] and state.get("source_path"):
                             con.execute("UPDATE workspaces SET source_path=? WHERE id=? AND source_kind='managed'",
                                         (state["source_path"], row["workspace_id"]))
@@ -885,6 +966,8 @@ def main():
                 con.execute("ALTER TABLE runs ADD COLUMN workspace_id INTEGER REFERENCES workspaces(id)")
             if "source_path" not in [x[1] for x in con.execute("PRAGMA table_info(runs)")]:
                 con.execute("ALTER TABLE runs ADD COLUMN source_path TEXT")
+            if "event_log_offset" not in [x[1] for x in con.execute("PRAGMA table_info(runs)")]:
+                con.execute("ALTER TABLE runs ADD COLUMN event_log_offset INTEGER NOT NULL DEFAULT 0")
             import control
             control.migrate(con)
         threading.Thread(target=poll, args=(Manager.db_path,), daemon=True).start()

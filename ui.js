@@ -49,6 +49,7 @@ const labels = {
   },
 };
 Object.assign(labels.en, {
+  eventTimeline:'Event timeline',
   planner:'Planner', remotePlanner:'Plan on selected Node', managerPlanner:'Plan on Manager (requires model API)',
   directory:'Working directory / project', browse:'Choose folder…', requirement:'What would you like to build or fix?',
   taskHelp:'Choose a folder and machine, then describe your goal. The remote agent plans, implements, reviews and tests it.',
@@ -63,6 +64,7 @@ Object.assign(labels.en, {
   acceptanceHelp:'Code review and tests are part of the remote workflow. Your acceptance confirms the delivered result. For GitHub projects it merges the PR; otherwise it keeps the result branch on this Mac. Rejection closes the PR, if any, and cleans the remote worktree.',
 });
 Object.assign(labels.zh, {
+  eventTimeline:'执行事件',
   planner:'规划位置', remotePlanner:'在所选远端机器规划', managerPlanner:'在 Manager 本地规划（需模型 API）',
   directory:'工作目录 / 项目', browse:'选择文件夹…', requirement:'描述你想完成的需求',
   taskHelp:'选择目录和机器，写下目标。远端 Agent 会规划、实现、评审、测试并生成验收报告。',
@@ -97,6 +99,8 @@ const errorName = value => {
 };
 let current = 'tasks';
 let selectedRun = null;
+let eventStream = null;
+let selectedDeliveryPending = false;
 
 async function api(path, method = 'GET', body) {
   const response = await fetch('/api' + path, {
@@ -308,14 +312,17 @@ function wireRunButtons() {
 
 async function details(id) {
   selectedRun = id;
-  const [run, logs, art, pkg] = await Promise.all([
-    api('/runs/' + id), api('/runs/' + id + '/logs'), api('/runs/' + id + '/artifacts'), api('/runs/' + id + '/package')
+  if (eventStream) { eventStream.close(); eventStream = null; }
+  const [run, logs, art, pkg, events] = await Promise.all([
+    api('/runs/' + id), api('/runs/' + id + '/logs'), api('/runs/' + id + '/artifacts'),
+    api('/runs/' + id + '/package'), api('/runs/' + id + '/events')
   ]);
   const target = document.getElementById('detail');
   if (!target || selectedRun !== id) return;
+  selectedDeliveryPending = run.status === 'REVIEW' && ['pending','publishing'].includes(run.delivery_status);
   const ready = !art.pipeline_version || (art.ready_to_merge && ['ready','merged'].includes(run.delivery_status));
   const safePr = /^https:\/\/github\.com\//.test(run.pr_url || '') ? run.pr_url : '';
-  target.innerHTML = `<h2>${t('run')} #${id}</h2><p>${esc(stageName(run.stage || run.status))} ${esc(errorName(run.error))}</p>
+  target.innerHTML = `<h2>${t('run')} #${id}</h2><p id="run-status">${esc(stageName(run.stage || run.status))} ${esc(errorName(run.error))}</p>
     ${run.status === 'NEEDS_INPUT' ? `<form id="answer-form"><h3>${t('question')}</h3><p>${esc(run.question)}</p><textarea name="answer" required rows="5"></textarea><p><button>${t('answer')}</button></p></form>` : ''}
     <p>${t('sourceRepo')}: <code>${esc(run.source_path)}</code><br>${t('workspacePath')}: <code>${esc(run.workspace)}</code><br>${t('branch')}: <code>${esc(run.branch)}</code></p>
     <h3>${t('delivery')}</h3><p>${esc(run.delivery_status)} <span class="bad">${esc(run.delivery_error)}</span></p>
@@ -330,7 +337,9 @@ async function details(id) {
     <h3>${t('files')}</h3><p>${esc((art.changed_files || []).join(', '))}</p>
     <h3>${t('gatesResult')}</h3>${(art.gates || []).map(gate => `<p class="${gate.exit_code ? 'bad' : 'good'}">${esc(gate.command)} — ${t('exitCode')} ${gate.exit_code}</p><pre>${esc(gate.output)}</pre>`).join('')}
     <details><summary>${t('package')}</summary><pre>${esc(JSON.stringify(pkg,null,2))}</pre></details>
-    <h3>${t('diff')}</h3><pre>${esc(art.diff)}</pre><h3>${t('logs')}</h3><pre>${esc(logs.text)}</pre>
+    <h3>${t('diff')}</h3><pre>${esc(art.diff)}</pre>
+    <h3>${t('eventTimeline')}</h3><div id="event-timeline">${events.filter(x => x.kind === 'status' || x.kind === 'agent').slice(-80).map(eventLine).join('')}</div>
+    <h3>${t('logs')}</h3><pre id="log-view">${esc(logs.text)}</pre>
     ${run.status === 'REVIEW' ? `<button id="approve" ${ready ? '' : 'disabled'}>${pkg.delivery === 'github' ? t('approveMerge') : t('approve')}</button><button id="reject">${t('reject')}</button>` : ''}`;
   const retry = document.getElementById('retry-delivery');
   const answerForm = document.getElementById('answer-form');
@@ -349,15 +358,47 @@ async function details(id) {
       finally { button.disabled = false; }
     };
   }
+  openRunStream(id, events.length ? events[events.length - 1].id : 0);
+}
+
+function eventLine(item) {
+  const data = item.data || {};
+  const label = item.kind === 'status'
+    ? `${stageName(data.stage || data.status)} · ${stateName(data.status)}`
+    : `${data.title || data.type || 'Agent'} · ${data.status || ''}`;
+  return `<p><small>${esc(item.created_at)}</small> ${esc(label)}</p>`;
+}
+
+function openRunStream(id, after) {
+  eventStream = new EventSource(`/api/runs/${id}/stream?after=${after}`);
+  eventStream.onmessage = message => {
+    if (selectedRun !== id) return;
+    const item = JSON.parse(message.data);
+    const timeline = document.getElementById('event-timeline');
+    const logView = document.getElementById('log-view');
+    if (item.kind === 'log' && logView) logView.textContent += item.data.text;
+    if (item.kind === 'agent' && logView) logView.textContent += item.data.raw || '';
+    if ((item.kind === 'status' || item.kind === 'agent') && timeline) {
+      timeline.insertAdjacentHTML('beforeend', eventLine(item));
+      while (timeline.children.length > 80) timeline.firstElementChild.remove();
+    }
+    if (item.kind === 'status') {
+      const status = document.getElementById('run-status');
+      if (status) status.textContent = `${stageName(item.data.stage || item.data.status)} ${errorName(item.data.error)}`;
+      if (['NEEDS_INPUT','REVIEW','FAILED','SUCCEEDED','REJECTED','CANCELLED'].includes(item.data.status)) show(current);
+    }
+  };
 }
 
 window.onunhandledrejection = event => alert(errorName(event.reason?.message || event.reason));
 document.querySelectorAll('nav button[data-view]').forEach(button => button.onclick = () => {
+  if (eventStream) { eventStream.close(); eventStream = null; }
   selectedRun = null;
   show(button.dataset.view);
 });
 show('tasks');
 setInterval(() => {
   if (document.activeElement?.closest?.('#answer-form')) return;
+  if (eventStream && selectedRun && !selectedDeliveryPending) return;
   if (current === 'running' || current === 'review') show(current);
 }, 5000);

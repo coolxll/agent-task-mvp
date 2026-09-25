@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import urllib.request
 import urllib.error
 
@@ -129,6 +129,14 @@ class WorkflowTests(unittest.TestCase):
         self.__class__.completed_run = run
         self.assertEqual(run['status'],'REVIEW',run)
         self.assertEqual(run['agent_kind'],'codex')
+        events=self.api('/runs/%s/events'%run_id)
+        self.assertTrue(any(x['kind']=='status' and x['data'].get('status')=='REVIEW' for x in events))
+        self.assertTrue(any(x['kind']=='log' and 'PLANNING' in x['data']['text'] for x in events))
+        self.assertEqual(sorted(x['id'] for x in events),[x['id'] for x in events])
+        with urllib.request.urlopen('http://127.0.0.1:%s/api/runs/%s/stream?after=%s' %
+            (self.manager_port,run_id,events[-2]['id']),timeout=5) as stream:
+            self.assertEqual(stream.readline().decode().strip(),'id: %s' % events[-1]['id'])
+            self.assertIn('"kind"',stream.readline().decode())
         self.assertEqual(self.api('/runs/%s/package'%run_id)['agent_kind'],'codex')
         self.assertEqual(run['delivery_status'],'ready',run)
         art=run['artifacts']
@@ -201,6 +209,24 @@ class WorkflowTests(unittest.TestCase):
         run = self.api('/runs/'+str(result['id']))
         self.assertEqual(run['status'], 'FAILED')
         self.assertEqual(run['error'], result['error'])
+
+    def test_03c_manager_plan_is_sent_to_runner(self):
+        from fastapi.testclient import TestClient
+        plan = {'summary':'Fix addition', 'steps':[{'id':'fix','title':'Fix addition',
+            'instructions':'Fix add and test it','depends_on':[]}],
+            'acceptance_criteria':['Addition returns a sum'], 'gates':['python3 -m unittest -v']}
+        with patch('native_planner.plan_task', new=AsyncMock(return_value=plan)):
+            with TestClient(app.create_manager_app(self.db)) as client:
+                response = client.post('/api/submit', json={'project_id':self.project,
+                    'node_id':self.node,'agent_kind':'codex','planner':'manager',
+                    'requirement':'Fix addition with Manager planning'})
+                self.assertEqual(response.status_code, 201, response.text)
+                run_id = response.json()['id']
+        run = self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['status'],'REVIEW',run)
+        self.assertEqual(self.api('/runs/%s/package'%run_id)['manager_plan'], plan)
+        self.assertEqual(run['artifacts']['stages'][0]['source'],'manager')
+        self.api('/runs/%s/review'%run_id,{'decision':'reject'})
 
     def test_03d_manager_planning_does_not_hold_database_lock(self):
         from fastapi.testclient import TestClient
