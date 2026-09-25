@@ -117,8 +117,14 @@ def run(state, run_dir, workspace, driver, git, update, say, log, save):
             prompt += '\nPreviously answered questions. Do not ask them again: ' + json.dumps(clarifications, ensure_ascii=False)
         if paused:
             prompt = 'The user answered your question: ' + state['answer'] + '\nContinue this same stage. ' + prompt
-        proc = driver.start(rules + prompt, workspace, output, log, access,
-                            session_id=record.get('agent_session_id') if paused else None, readonly=readonly)
+        try:
+            proc = driver.start(rules + prompt, workspace, output, log, access,
+                                session_id=record.get('agent_session_id') if paused else None,
+                                readonly=readonly, schema=schema)
+        except TypeError:
+            proc = driver.start(rules + prompt, workspace, output, log, access,
+                                session_id=record.get('agent_session_id') if paused else None,
+                                readonly=readonly)
         try:
             update(pid=proc.pid)
             proc.wait(timeout=1800)
@@ -128,7 +134,10 @@ def run(state, run_dir, workspace, driver, git, update, say, log, save):
             value = driver.result(output)
             if schema and value.strip().startswith('```'):
                 value = value.strip().split('\n', 1)[1].rsplit('```', 1)[0]
-            session_id = driver.session_id(log.name, log_offset)
+            try:
+                session_id = driver.session_id(log.name, log_offset, result_path=output)
+            except TypeError:
+                session_id = driver.session_id(log.name, log_offset)
             if session_id:
                 record['agent_session_id'] = session_id
                 update(agent_session_id=session_id)
