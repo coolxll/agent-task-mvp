@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """Manager and remote Runner for agent-driven Git worktree tasks."""
 import argparse
-import agent_drivers
-import git_io
-import pipeline
-from contextlib import closing
 import datetime as dt
 import fcntl
 import json
 import os
 import re
 import shutil
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -19,9 +14,21 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import closing
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlparse
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import agent_drivers
+import control
+import git_io
+import pipeline
 
 
 def now():
@@ -61,190 +68,43 @@ def slug(value):
     return re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:40] or "task"
 
 
-class Http(BaseHTTPRequestHandler):
-    def reply(self, status, data, content_type="application/json"):
-        body = data.encode() if isinstance(data, str) else json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", content_type + "; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def payload(self):
-        size = int(self.headers.get("Content-Length", "0"))
-        if size > 72_000_000:
-            raise ValueError("request too large")
-        return json.loads(self.rfile.read(size) or b"{}")
-
-    def do_GET(self):
-        self.dispatch("GET")
-
-    def do_POST(self):
-        self.dispatch("POST")
-
-    def dispatch(self, method):
-        try:
-            if method == "POST" and self.headers.get("Origin") and urlparse(self.headers["Origin"]).netloc != self.headers.get("Host"):
-                return self.reply(403, {"error": "cross-origin mutation is not allowed"})
-            self.route(method, urlparse(self.path).path)
-        except (ValueError, KeyError) as exc:
-            self.reply(400, {"error": str(exc)})
-        except Exception as exc:
-            self.reply(500, {"error": str(exc)})
-
-    def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (now(), fmt % args))
+async def get_payload(request: Request) -> dict:
+    body = await request.body()
+    if not body.strip():
+        return {}
+    try:
+        return json.loads(body)
+    except Exception as exc:
+        raise ValueError(f"invalid JSON payload: {exc}")
 
 
-class Runner(Http):
-    root: Path
-    token: str
-    agent_access: str
+class Runner:
+    root: Path = None
+    token: str = None
+    agent_access: str = "workspace"
+
+    def __init__(self, root: Optional[Path] = None, token: Optional[str] = None, agent_access: str = "workspace"):
+        if root is not None:
+            self.root = Path(root).resolve()
+        if token is not None:
+            self.token = token
+        self.agent_access = agent_access
 
     def state_path(self, run_id):
         if not re.fullmatch(r"[0-9]+", str(run_id)):
             raise ValueError("invalid run id")
-        return self.root / "runs" / str(run_id) / "state.json"
+        root = getattr(self, "root", None) or Runner.root
+        return root / "runs" / str(run_id) / "state.json"
 
     def update(self, run_id, **changes):
         path = self.state_path(run_id)
         return update_state(path, changes)
 
-    def route(self, method, path):
-        if self.headers.get("Authorization") != "Bearer " + self.token:
-            return self.reply(401, {"error": "unauthorized"})
-        if path == "/health" and method == "GET":
-            return self.reply(200, {"ok": True, "api_version": 2,
-                                    "agent_kinds": agent_drivers.available_kinds()})
-        if path == "/runs" and method == "POST":
-            p = self.payload()
-            run_id = str(int(p["id"]))
-            source_kind = p.get("source_kind", "existing")
-            if source_kind == "managed":
-                workspace_id = str(int(p["workspace_id"]))
-                if not p.get("repo_url") and not p.get("source_bundle"):
-                    raise ValueError("managed workspace requires repo_url")
-                source = self.root / "repos" / workspace_id
-            elif source_kind == "existing":
-                source = Path(p["source_path"]).resolve(strict=True)
-                if not source.is_dir() or git("rev-parse", "--show-toplevel", cwd=source).stdout.strip() != str(source):
-                    raise ValueError("source_path must be a Git repository root")
-            else:
-                raise ValueError("invalid source_kind")
-            if any(x == "" for x in [p.get("title"), p.get("description")]):
-                raise ValueError("title and description are required")
-            agent_kind = p.get("agent_kind", agent_drivers.default_kind())
-            agent_drivers.get_driver(agent_kind)
-            run_dir = self.root / "runs" / run_id
-            run_dir.mkdir(parents=True, exist_ok=False)
-            branch = "agent/task-%s-run-%s-%s" % (p["task_id"], run_id, slug(p["title"]))
-            workspace = self.root / "worktrees" / run_id
-            state = {"id": int(run_id), "status": "PENDING", "source_path": str(source),
-                     "source_kind": source_kind, "repo_url": p.get("repo_url", ""),
-                     "workspace_id": p.get("workspace_id"),
-                     "workspace": str(workspace), "branch": branch, "base_ref": p.get("base_ref") or "HEAD",
-                     "title": p["title"], "description": p["description"],
-                     "acceptance_criteria": p.get("acceptance_criteria", ""),
-                     "gates": p.get("gates", []), "agent_kind": agent_kind, "agent_access": self.agent_access,
-                     "pid": None,
-                     "error": None, "created_at": now(), "updated_at": now()}
-            if not isinstance(state["gates"], list) or not all(isinstance(x, str) for x in state["gates"]):
-                raise ValueError("gates must be a list of commands")
-            state.update(stage="PENDING", package=p.get("package", {}), worker_pid=None)
-            if p.get("source_bundle"):
-                git_io.decode_bundle(p["source_bundle"], run_dir / "input.bundle")
-            atomic_json(run_dir / "package.json", p.get("package", {}))
-            atomic_json(run_dir / "state.json", state)
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(self.root),
-                              "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return self.reply(201, state)
-        m = re.fullmatch(r"/runs/(\d+)(?:/(logs|artifacts|cancel|review|cleanup|package|bundle|answer))?", path)
-        if not m:
-            return self.reply(404, {"error": "not found"})
-        run_id, suffix = m.groups()
-        state = read_json(self.state_path(run_id))
-        run_dir = self.root / "runs" / run_id
-        if method == "GET" and not suffix:
-            return self.reply(200, state)
-        if method == "GET" and suffix == "package":
-            return self.reply(200, state.get("package", {}))
-        if method == "GET" and suffix == "bundle":
-            if state["status"] not in ("REVIEW", "SUCCEEDED"):
-                raise ValueError("result bundle is not ready")
-            return self.reply(200, git_io.encode_bundle(run_dir / "result.bundle"))
-        if method == "GET" and suffix == "logs":
-            file = run_dir / "run.log"
-            return self.reply(200, {"text": file.read_text(errors="replace")[-200_000:] if file.exists() else ""})
-        if method == "GET" and suffix == "artifacts":
-            file = run_dir / "artifacts.json"
-            return self.reply(200, read_json(file) if file.exists() else {})
-        if method == "POST" and suffix == "answer":
-            answer = self.payload().get("answer", "").strip()
-            if not answer or len(answer) > 20000:
-                raise ValueError("answer must contain 1–20000 characters")
-            state = update_state(self.state_path(run_id), {"status": "RUNNING", "answer": answer,
-                "question": None, "error": None}, allowed_from=("NEEDS_INPUT",))
-            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(self.root),
-                              "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return self.reply(200, state)
-        if method == "POST" and suffix == "cancel":
-            if state["status"] not in ("PENDING", "PROVISIONING", "RUNNING", "VERIFYING", "NEEDS_INPUT"):
-                raise ValueError("run is not active")
-            state = update_state(self.state_path(run_id),
-                {"status": "CANCELLED", "finished_at": now()},
-                allowed_from=("PENDING", "PROVISIONING", "RUNNING", "VERIFYING", "NEEDS_INPUT"))
-            if state.get("pid"):
-                try:
-                    agent_drivers.get_driver(state["agent_kind"]).cancel(state["pid"])
-                except ProcessLookupError:
-                    pass
-            return self.reply(200, state)
-        if method == "POST" and suffix == "cleanup":
-            if state["status"] not in ("FAILED", "CANCELLED"):
-                raise ValueError("only failed or cancelled runs can be cleaned here")
-            if state.get("worker_pid"):
-                try:
-                    os.kill(state["worker_pid"], 0)
-                except ProcessLookupError:
-                    pass
-                else:
-                    raise ValueError("worker is stopping; retry cleanup shortly")
-            self.cleanup(state, delete_branch=True)
-            return self.reply(200, self.update(run_id, cleaned_at=now()))
-        if method == "POST" and suffix == "review":
-            decision = self.payload().get("decision")
-            if state["status"] != "REVIEW" or decision not in ("approve", "reject"):
-                raise ValueError("run is not ready for review")
-            source = Path(state["source_path"])
-            workspace = Path(state["workspace"])
-            if decision == "approve":
-                artifacts_file = run_dir / "artifacts.json"
-                artifacts = read_json(artifacts_file) if artifacts_file.exists() else {}
-                if artifacts.get("pipeline_version") and not artifacts.get("ready_to_merge"):
-                    raise ValueError("Code review, tests and acceptance must pass before approval")
-                if artifacts.get("commit_sha") and git("rev-parse", "HEAD", cwd=workspace).stdout.strip() != artifacts["commit_sha"]:
-                    raise ValueError("Reviewed commit changed")
-                if artifacts.get("pipeline_version") and git("status", "--porcelain", cwd=workspace).stdout.strip():
-                    raise ValueError("Reviewed worktree changed")
-                git("add", "-A", cwd=workspace)
-                if git("diff", "--cached", "--quiet", cwd=workspace, check=False).returncode:
-                    git("-c", "user.name=Agent Task MVP", "-c", "user.email=agent-task-mvp@local",
-                        "commit", "-m", "Task %s: %s" % (run_id, state["title"]), cwd=workspace)
-                commit = git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
-            else:
-                commit = None
-            self.cleanup(state, delete_branch=decision == "reject")
-            return self.reply(200, self.update(run_id, status="SUCCEEDED" if decision == "approve" else "REJECTED",
-                                               commit_sha=commit, finished_at=now(), cleaned_at=now()))
-        self.reply(404, {"error": "not found"})
-
     def cleanup(self, state, delete_branch=False):
+        root = getattr(self, "root", None) or Runner.root
         source = Path(state["source_path"])
         workspace = Path(state["workspace"])
-        if workspace.parent != self.root / "worktrees" or workspace.name != str(state["id"]):
+        if workspace.parent != root / "worktrees" or workspace.name != str(state["id"]):
             raise ValueError("workspace outside Runner root")
         if not state["branch"].startswith("agent/task-"):
             raise ValueError("branch is not owned by Runner")
@@ -254,6 +114,214 @@ class Runner(Http):
             git("worktree", "remove", "--force", str(workspace), cwd=source)
         if delete_branch and source.exists() and git("branch", "--list", state["branch"], cwd=source).stdout.strip():
             git("branch", "-D", state["branch"], cwd=source)
+
+
+def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -> FastAPI:
+    app = FastAPI(title="Agent Task Runner", docs_url="/docs", redoc_url=None)
+    runner = Runner(root, token, agent_access)
+
+    @app.exception_handler(ValueError)
+    async def value_error_handler(request: Request, exc: ValueError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        detail = exc.detail if exc.detail != "Not Found" else "not found"
+        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+
+    @app.exception_handler(Exception)
+    async def general_error_handler(request: Request, exc: Exception):
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    @app.middleware("http")
+    async def runner_middleware(request: Request, call_next):
+        origin = request.headers.get("origin")
+        host = request.headers.get("host")
+        if request.method == "POST" and origin:
+            if urlparse(origin).netloc != host:
+                return JSONResponse(status_code=403, content={"error": "cross-origin mutation is not allowed"})
+        content_length = int(request.headers.get("content-length", 0))
+        if content_length > 72_000_000:
+            return JSONResponse(status_code=400, content={"error": "request too large"})
+        auth = request.headers.get("authorization")
+        if auth != "Bearer " + token:
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+        return await call_next(request)
+
+    @app.get("/health")
+    def health():
+        return {"ok": True, "api_version": 2, "agent_kinds": agent_drivers.available_kinds()}
+
+    @app.post("/runs", status_code=201)
+    async def create_run(request: Request):
+        p = await get_payload(request)
+        run_id = str(int(p["id"]))
+        source_kind = p.get("source_kind", "existing")
+        if source_kind == "managed":
+            workspace_id = str(int(p["workspace_id"]))
+            if not p.get("repo_url") and not p.get("source_bundle"):
+                raise ValueError("managed workspace requires repo_url")
+            source = root / "repos" / workspace_id
+        elif source_kind == "existing":
+            source = Path(p["source_path"]).resolve(strict=True)
+            if not source.is_dir() or git("rev-parse", "--show-toplevel", cwd=source).stdout.strip() != str(source):
+                raise ValueError("source_path must be a Git repository root")
+        else:
+            raise ValueError("invalid source_kind")
+        if any(x == "" for x in [p.get("title"), p.get("description")]):
+            raise ValueError("title and description are required")
+        agent_kind = p.get("agent_kind", agent_drivers.default_kind())
+        agent_drivers.get_driver(agent_kind)
+        run_dir = root / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+        branch = "agent/task-%s-run-%s-%s" % (p["task_id"], run_id, slug(p["title"]))
+        workspace = root / "worktrees" / run_id
+        state = {"id": int(run_id), "status": "PENDING", "source_path": str(source),
+                 "source_kind": source_kind, "repo_url": p.get("repo_url", ""),
+                 "workspace_id": p.get("workspace_id"),
+                 "workspace": str(workspace), "branch": branch, "base_ref": p.get("base_ref") or "HEAD",
+                 "title": p["title"], "description": p["description"],
+                 "acceptance_criteria": p.get("acceptance_criteria", ""),
+                 "gates": p.get("gates", []), "agent_kind": agent_kind, "agent_access": agent_access,
+                 "pid": None,
+                 "error": None, "created_at": now(), "updated_at": now()}
+        if not isinstance(state["gates"], list) or not all(isinstance(x, str) for x in state["gates"]):
+            raise ValueError("gates must be a list of commands")
+        state.update(stage="PENDING", package=p.get("package", {}), worker_pid=None)
+        if p.get("source_bundle"):
+            git_io.decode_bundle(p["source_bundle"], run_dir / "input.bundle")
+        atomic_json(run_dir / "package.json", p.get("package", {}))
+        atomic_json(run_dir / "state.json", state)
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(root),
+                          "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return state
+
+    @app.get("/runs/{run_id}")
+    def get_run(run_id: str):
+        sp = runner.state_path(run_id)
+        if not sp.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return read_json(sp)
+
+    @app.get("/runs/{run_id}/package")
+    def get_run_package(run_id: str):
+        sp = runner.state_path(run_id)
+        if not sp.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return read_json(sp).get("package", {})
+
+    @app.get("/runs/{run_id}/bundle")
+    def get_run_bundle(run_id: str):
+        sp = runner.state_path(run_id)
+        if not sp.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        state = read_json(sp)
+        if state["status"] not in ("REVIEW", "SUCCEEDED"):
+            raise ValueError("result bundle is not ready")
+        run_dir = root / "runs" / str(run_id)
+        return git_io.encode_bundle(run_dir / "result.bundle")
+
+    @app.get("/runs/{run_id}/logs")
+    def get_run_logs(run_id: str):
+        sp = runner.state_path(run_id)
+        if not sp.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        run_dir = root / "runs" / str(run_id)
+        file = run_dir / "run.log"
+        return {"text": file.read_text(errors="replace")[-200_000:] if file.exists() else ""}
+
+    @app.get("/runs/{run_id}/artifacts")
+    def get_run_artifacts(run_id: str):
+        sp = runner.state_path(run_id)
+        if not sp.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        run_dir = root / "runs" / str(run_id)
+        file = run_dir / "artifacts.json"
+        return read_json(file) if file.exists() else {}
+
+    @app.post("/runs/{run_id}/answer")
+    async def run_answer(run_id: str, request: Request):
+        p = await get_payload(request)
+        answer = p.get("answer", "").strip()
+        if not answer or len(answer) > 20000:
+            raise ValueError("answer must contain 1–20000 characters")
+        state = update_state(runner.state_path(run_id), {"status": "RUNNING", "answer": answer,
+            "question": None, "error": None}, allowed_from=("NEEDS_INPUT",))
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(root),
+                          "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return state
+
+    @app.post("/runs/{run_id}/cancel")
+    def run_cancel(run_id: str):
+        state = read_json(runner.state_path(run_id))
+        if state["status"] not in ("PENDING", "PROVISIONING", "RUNNING", "VERIFYING", "NEEDS_INPUT"):
+            raise ValueError("run is not active")
+        state = update_state(runner.state_path(run_id),
+            {"status": "CANCELLED", "finished_at": now()},
+            allowed_from=("PENDING", "PROVISIONING", "RUNNING", "VERIFYING", "NEEDS_INPUT"))
+        if state.get("pid"):
+            try:
+                agent_drivers.get_driver(state["agent_kind"]).cancel(state["pid"])
+            except ProcessLookupError:
+                pass
+        return state
+
+    @app.post("/runs/{run_id}/cleanup")
+    def run_cleanup(run_id: str):
+        state = read_json(runner.state_path(run_id))
+        if state["status"] not in ("FAILED", "CANCELLED"):
+            raise ValueError("only failed or cancelled runs can be cleaned here")
+        if state.get("worker_pid"):
+            try:
+                os.kill(state["worker_pid"], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise ValueError("worker is stopping; retry cleanup shortly")
+        runner.cleanup(state, delete_branch=True)
+        return runner.update(run_id, cleaned_at=now())
+
+    @app.post("/runs/{run_id}/review")
+    async def run_review(run_id: str, request: Request):
+        p = await get_payload(request)
+        decision = p.get("decision")
+        state = read_json(runner.state_path(run_id))
+        if state["status"] != "REVIEW" or decision not in ("approve", "reject"):
+            raise ValueError("run is not ready for review")
+        source = Path(state["source_path"])
+        workspace = Path(state["workspace"])
+        run_dir = root / "runs" / run_id
+        if decision == "approve":
+            artifacts_file = run_dir / "artifacts.json"
+            artifacts = read_json(artifacts_file) if artifacts_file.exists() else {}
+            if artifacts.get("pipeline_version") and not artifacts.get("ready_to_merge"):
+                raise ValueError("Code review, tests and acceptance must pass before approval")
+            if artifacts.get("commit_sha") and git("rev-parse", "HEAD", cwd=workspace).stdout.strip() != artifacts["commit_sha"]:
+                raise ValueError("Reviewed commit changed")
+            if artifacts.get("pipeline_version") and git("status", "--porcelain", cwd=workspace).stdout.strip():
+                raise ValueError("Reviewed worktree changed")
+            git("add", "-A", cwd=workspace)
+            if git("diff", "--cached", "--quiet", cwd=workspace, check=False).returncode:
+                git("-c", "user.name=Agent Task MVP", "-c", "user.email=agent-task-mvp@local",
+                    "commit", "-m", "Task %s: %s" % (run_id, state["title"]), cwd=workspace)
+            commit = git("rev-parse", "HEAD", cwd=workspace).stdout.strip()
+        else:
+            commit = None
+        runner.cleanup(state, delete_branch=decision == "reject")
+        return runner.update(run_id, status="SUCCEEDED" if decision == "approve" else "REJECTED",
+                             commit_sha=commit, finished_at=now(), cleaned_at=now())
+
+    return app
 
 
 def execute(root, run_id):
@@ -379,11 +447,16 @@ def runner_call(node, method, path, payload=None, timeout=10):
         raise RuntimeError("Runner HTTP %s: %s" % (exc.code, exc.read().decode()[:500])) from exc
 
 
-class Manager(Http):
-    db_path: Path
+class Manager:
+    db_path: Path = None
+
+    def __init__(self, db_path: Optional[Path] = None):
+        if db_path is not None:
+            self.db_path = Path(db_path).resolve()
 
     def db(self):
-        con = sqlite3.connect(self.db_path, timeout=10)
+        db_file = getattr(self, "db_path", None) or Manager.db_path
+        con = sqlite3.connect(db_file, timeout=10)
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         return con
@@ -394,111 +467,328 @@ class Manager(Http):
             raise ValueError("%s %s not found" % (table, key))
         return dict(row)
 
-    def route(self, method, path):
-        if path == "/" and method == "GET":
-            return self.reply(200, UI, "text/html")
-        if path == "/zh" and method == "GET":
-            return self.reply(200, UI_ZH, "text/html")
-        if path == "/README.zh-CN.md" and method == "GET":
-            return self.reply(200, Path(__file__).with_name("README.zh-CN.md").read_text(encoding="utf-8"), "text/markdown")
-        if path == "/ui.js" and method == "GET":
-            return self.reply(200, Path(__file__).with_name("ui.js").read_text(encoding="utf-8"), "application/javascript")
-        if method == "GET" and re.fullmatch(r"/docs/[A-Za-z0-9.-]+\.md", path):
-            doc = Path(__file__).parent / path.lstrip("/")
-            if doc.is_file():
-                return self.reply(200, doc.read_text(), "text/markdown")
-        with closing(self.db()) as con, con:
-            import control
-            if control.route(self, con, method, path):
-                return
-            if method == "GET" and path in ("/api/projects", "/api/nodes", "/api/workspaces", "/api/tasks", "/api/runs"):
-                table = path.split("/")[-1]
-                rows = [dict(x) for x in con.execute("SELECT * FROM %s ORDER BY id DESC" % table)]
-                if table == "nodes":
-                    for row in rows: row.pop("token")
-                if table == "projects":
-                    for row in rows: row["gates"] = json.loads(row["gates"])
-                if table == "runs":
-                    for row in rows: row["artifacts"] = json.loads(row["artifacts"])
-                return self.reply(200, rows)
-            if method == "GET" and path == "/api/agents":
-                return self.reply(200, agent_drivers.available_kinds())
-            if method == "POST" and path == "/api/projects":
-                p = self.payload()
-                if not p.get("name", "").strip() or not (p.get("repo_url", "").strip() or p.get("source_path", "").strip()):
-                    raise ValueError("Project requires a name and a repository URL or existing remote path")
-                gates = p.get("gates", [])
-                if not isinstance(gates, list) or not all(isinstance(x, str) for x in gates):
-                    raise ValueError("gates must be a list of commands")
-                cur = con.execute("INSERT INTO projects(name,source_path,repo_url,base_ref,gates,created_at) VALUES(?,?,?,?,?,?)",
-                    (p["name"].strip(), p.get("source_path", "").strip(), git_io.validate_remote(p.get("repo_url", "").strip()),
-                     p.get("base_ref") or "HEAD", json.dumps(gates), now()))
-                return self.reply(201, {"id": cur.lastrowid})
-            if method == "POST" and path == "/api/nodes":
-                p = self.payload()
-                runner_call(p, "GET", "/health")
-                cur = con.execute("INSERT INTO nodes(name,endpoint,token,created_at) VALUES(?,?,?,?)",
-                    (p["name"], p["endpoint"], p["token"], now()))
-                return self.reply(201, {"id": cur.lastrowid})
-            if method == "POST" and path == "/api/workspaces":
-                p = self.payload()
-                project = self.row(con, "projects", p["project_id"])
-                self.row(con, "nodes", p["node_id"])
-                kind = p.get("source_kind")
-                if kind not in ("managed", "existing"):
-                    raise ValueError("workspace source_kind must be managed or existing")
-                if kind == "managed" and not project["repo_url"]:
-                    raise ValueError("Project needs a repository URL for a managed clone")
-                source_path = p.get("source_path", "").strip()
-                if kind == "existing" and not source_path:
-                    raise ValueError("existing workspace requires source_path")
-                name = p.get("name", "").strip() or ("Managed clone" if kind == "managed" else source_path)
-                existing = con.execute("SELECT id FROM workspaces WHERE project_id=? AND node_id=? AND name=?",
-                                       (project["id"], p["node_id"], name)).fetchone()
-                if existing:
-                    return self.reply(200, {"id": existing["id"]})
-                cur = con.execute("INSERT INTO workspaces(project_id,node_id,name,source_kind,source_path,created_at) VALUES(?,?,?,?,?,?)",
-                    (project["id"], p["node_id"], name, kind, source_path, now()))
-                return self.reply(201, {"id": cur.lastrowid})
-            if method == "POST" and path == "/api/tasks":
-                p = self.payload()
-                self.row(con, "projects", p["project_id"])
-                cur = con.execute("INSERT INTO tasks(project_id,title,description,acceptance_criteria,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                    (p["project_id"], p["title"], p["description"], p.get("acceptance_criteria", ""), "TODO", now(), now()))
-                return self.reply(201, {"id": cur.lastrowid})
-            if method == "POST" and path == "/api/runs":
-                return self.reply(201, control.start_run(self, con, self.payload()))
-            m = re.fullmatch(r"/api/runs/(\d+)(?:/(logs|artifacts|cancel|review|cleanup|package|bundle|answer))?", path)
-            if m:
-                run_id, suffix = m.groups()
-                run = self.row(con, "runs", run_id)
-                node = self.row(con, "nodes", run["node_id"])
-                if method == "GET" and not suffix:
-                    run["artifacts"] = json.loads(run["artifacts"])
-                    return self.reply(200, run)
-                if method == "GET" and suffix == "logs":
-                    return self.reply(200, {"text": run["logs"]})
-                if method == "GET" and suffix == "artifacts":
-                    return self.reply(200, json.loads(run["artifacts"]))
-                if method == "POST" and suffix == "answer":
-                    if run["status"] != "NEEDS_INPUT":
-                        raise ValueError("run is not waiting for input")
-                    state = runner_call(node, "POST", "/runs/%s/answer" % run_id, self.payload())
-                    con.execute("UPDATE runs SET status=?,question=NULL,updated_at=? WHERE id=?",
-                                (state["status"], now(), run_id))
-                    con.execute("UPDATE tasks SET status='RUNNING',updated_at=? WHERE id=?", (now(), run["task_id"]))
-                    return self.reply(200, state)
-                if method == "POST" and suffix in ("cancel", "review", "cleanup"):
-                    payload = self.payload() if suffix == "review" else {}
-                    if suffix == "review":
-                        control.review_delivery(self, con, run, node, payload)
-                    state = runner_call(node, "POST", "/runs/%s/%s" % (run_id, suffix), payload)
-                    con.execute("UPDATE runs SET status=?,commit_sha=?,finished_at=?,cleaned_at=?,updated_at=? WHERE id=?",
-                        (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
-                    task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
-                    con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
-                    return self.reply(200, state)
-        self.reply(404, {"error": "not found"})
+
+def create_manager_app(db_path: Path) -> FastAPI:
+    app = FastAPI(title="Agent Task Manager", docs_url="/docs", redoc_url=None)
+    manager = Manager(db_path)
+
+    @app.exception_handler(ValueError)
+    async def value_error_handler(request: Request, exc: ValueError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(KeyError)
+    async def key_error_handler(request: Request, exc: KeyError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+        detail = exc.detail if exc.detail != "Not Found" else "not found"
+        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+
+    @app.exception_handler(Exception)
+    async def general_error_handler(request: Request, exc: Exception):
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    @app.middleware("http")
+    async def manager_middleware(request: Request, call_next):
+        origin = request.headers.get("origin")
+        host = request.headers.get("host")
+        if request.method == "POST" and origin:
+            if urlparse(origin).netloc != host:
+                return JSONResponse(status_code=403, content={"error": "cross-origin mutation is not allowed"})
+        content_length = int(request.headers.get("content-length", 0))
+        if content_length > 72_000_000:
+            return JSONResponse(status_code=400, content={"error": "request too large"})
+        return await call_next(request)
+
+    # Static / Document routes
+    @app.get("/", response_class=HTMLResponse)
+    def index():
+        return UI
+
+    @app.get("/zh", response_class=HTMLResponse)
+    def index_zh():
+        return UI_ZH
+
+    @app.get("/ui.js")
+    def get_ui_js():
+        return Response(content=Path(__file__).with_name("ui.js").read_text(encoding="utf-8"), media_type="application/javascript")
+
+    @app.get("/README.zh-CN.md")
+    def get_readme():
+        return Response(content=Path(__file__).with_name("README.zh-CN.md").read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+
+    @app.get("/docs/{name}")
+    def get_doc(name: str):
+        if not re.fullmatch(r"[A-Za-z0-9.-]+\.md", name):
+            raise HTTPException(status_code=404, detail="not found")
+        doc = Path(__file__).parent / "docs" / name
+        if not doc.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        return Response(content=doc.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+
+    # API: Folders
+    @app.get("/api/folders")
+    def get_folders(path: Optional[str] = None):
+        target = Path(path or str(Path.home() / "workspace")).expanduser().resolve(strict=True)
+        if not target.is_dir():
+            raise ValueError("Not a directory")
+        directories = []
+        for child in sorted(target.iterdir()):
+            if not child.name.startswith(".") and child.is_dir():
+                directories.append({"name": child.name, "path": str(child), "git": (child / ".git").exists()})
+        return {"path": str(target), "parent": str(target.parent), "directories": directories}
+
+    # API: Projects
+    @app.get("/api/projects")
+    def list_projects():
+        with closing(manager.db()) as con:
+            rows = [dict(x) for x in con.execute("SELECT * FROM projects ORDER BY id DESC")]
+            for row in rows:
+                row["gates"] = json.loads(row["gates"])
+            return rows
+
+    @app.post("/api/projects", status_code=201)
+    async def create_project(request: Request):
+        p = await get_payload(request)
+        if not p.get("name", "").strip() or not (p.get("repo_url", "").strip() or p.get("source_path", "").strip()):
+            raise ValueError("Project requires a name and a repository URL or existing remote path")
+        gates = p.get("gates", [])
+        if not isinstance(gates, list) or not all(isinstance(x, str) for x in gates):
+            raise ValueError("gates must be a list of commands")
+        with closing(manager.db()) as con, con:
+            cur = con.execute("INSERT INTO projects(name,source_path,repo_url,base_ref,gates,created_at) VALUES(?,?,?,?,?,?)",
+                (p["name"].strip(), p.get("source_path", "").strip(), git_io.validate_remote(p.get("repo_url", "").strip()),
+                 p.get("base_ref") or "HEAD", json.dumps(gates), now()))
+            return {"id": cur.lastrowid}
+
+    @app.post("/api/projects/import")
+    async def import_project(request: Request):
+        p = await get_payload(request)
+        info = git_io.inspect_repo(p["path"])
+        with closing(manager.db()) as con, con:
+            existing = con.execute("SELECT id FROM projects WHERE local_path=?", (info["local_path"],)).fetchone()
+            if existing:
+                project_id = existing["id"]
+            else:
+                cur = con.execute("INSERT INTO projects(name,source_path,repo_url,base_ref,gates,created_at,local_path,delivery) VALUES(?,?,?,?,?,?,?,?)",
+                    (info["name"], "", info["repo_url"], info["base_ref"], "[]", now(), info["local_path"],
+                     "github" if git_io.github_repo(info["repo_url"]) else "branch"))
+                project_id = cur.lastrowid
+            return {**info, "id": project_id}
+
+    @app.post("/api/projects/{project_id}/settings")
+    async def update_project_settings(project_id: int, request: Request):
+        body = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            project = manager.row(con, "projects", project_id)
+            delivery = body.get("delivery", project["delivery"])
+            if delivery not in ("github", "branch"):
+                raise ValueError("Invalid delivery method")
+            if delivery == "github" and not git_io.github_repo(project["repo_url"]):
+                raise ValueError("GitHub delivery requires a github.com repository remote")
+            gates = body.get("gates", json.loads(project["gates"]))
+            if not isinstance(gates, list) or not all(isinstance(x, str) and x.strip() for x in gates):
+                raise ValueError("Invalid gates")
+            base = body.get("base_ref", project["base_ref"]).strip()
+            if not base or base.startswith("-"):
+                raise ValueError("Invalid base branch")
+            con.execute("UPDATE projects SET delivery=?,gates=?,base_ref=? WHERE id=?",
+                        (delivery, json.dumps(gates), base, project["id"]))
+            return {"ok": True}
+
+    # API: Nodes
+    @app.get("/api/nodes")
+    def list_nodes():
+        with closing(manager.db()) as con:
+            rows = [dict(x) for x in con.execute("SELECT * FROM nodes ORDER BY id DESC")]
+            for row in rows:
+                row.pop("token", None)
+            return rows
+
+    @app.post("/api/nodes", status_code=201)
+    async def create_node(request: Request):
+        p = await get_payload(request)
+        runner_call(p, "GET", "/health")
+        with closing(manager.db()) as con, con:
+            cur = con.execute("INSERT INTO nodes(name,endpoint,token,created_at) VALUES(?,?,?,?)",
+                (p["name"], p["endpoint"], p["token"], now()))
+            return {"id": cur.lastrowid}
+
+    # API: Workspaces
+    @app.get("/api/workspaces")
+    def list_workspaces():
+        with closing(manager.db()) as con:
+            return [dict(x) for x in con.execute("SELECT * FROM workspaces ORDER BY id DESC")]
+
+    @app.post("/api/workspaces")
+    async def create_workspace(request: Request):
+        p = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            project = manager.row(con, "projects", p["project_id"])
+            manager.row(con, "nodes", p["node_id"])
+            kind = p.get("source_kind")
+            if kind not in ("managed", "existing"):
+                raise ValueError("workspace source_kind must be managed or existing")
+            if kind == "managed" and not project["repo_url"]:
+                raise ValueError("Project needs a repository URL for a managed clone")
+            source_path = p.get("source_path", "").strip()
+            if kind == "existing" and not source_path:
+                raise ValueError("existing workspace requires source_path")
+            name = p.get("name", "").strip() or ("Managed clone" if kind == "managed" else source_path)
+            existing = con.execute("SELECT id FROM workspaces WHERE project_id=? AND node_id=? AND name=?",
+                                   (project["id"], p["node_id"], name)).fetchone()
+            if existing:
+                return JSONResponse(status_code=200, content={"id": existing["id"]})
+            cur = con.execute("INSERT INTO workspaces(project_id,node_id,name,source_kind,source_path,created_at) VALUES(?,?,?,?,?,?)",
+                (project["id"], p["node_id"], name, kind, source_path, now()))
+            return JSONResponse(status_code=201, content={"id": cur.lastrowid})
+
+    # API: Tasks
+    @app.get("/api/tasks")
+    def list_tasks():
+        with closing(manager.db()) as con:
+            return [dict(x) for x in con.execute("SELECT * FROM tasks ORDER BY id DESC")]
+
+    @app.post("/api/tasks", status_code=201)
+    async def create_task(request: Request):
+        p = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            manager.row(con, "projects", p["project_id"])
+            cur = con.execute("INSERT INTO tasks(project_id,title,description,acceptance_criteria,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (p["project_id"], p["title"], p["description"], p.get("acceptance_criteria", ""), "TODO", now(), now()))
+            return {"id": cur.lastrowid}
+
+    # API: Agents
+    @app.get("/api/agents")
+    def list_agents():
+        return agent_drivers.available_kinds()
+
+    # API: Submit
+    @app.post("/api/submit", status_code=201)
+    async def submit_task(request: Request):
+        p = await get_payload(request)
+        requirement = p.get("requirement", "").strip()
+        if not requirement or len(requirement) > 100000:
+            raise ValueError("Requirement must contain 1–100000 characters")
+        with closing(manager.db()) as con, con:
+            project = manager.row(con, "projects", p["project_id"])
+            manager.row(con, "nodes", p["node_id"])
+            if project["local_path"] and git_io.inspect_repo(project["local_path"])["dirty"]:
+                raise ValueError("工作目录有未提交改动，请先提交后再运行；系统不会自动修改或忽略这些改动。")
+            title = requirement.splitlines()[0][:100]
+            cur = con.execute("INSERT INTO tasks(project_id,title,description,acceptance_criteria,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (project["id"], title, requirement, "", "TODO", now(), now()))
+            result = control.start_run(manager, con, {"task_id": cur.lastrowid, "node_id": p["node_id"],
+                                                      "agent_kind": p.get("agent_kind", agent_drivers.default_kind())})
+            return result
+
+    # API: Runs
+    @app.get("/api/runs")
+    def list_runs():
+        with closing(manager.db()) as con:
+            rows = [dict(x) for x in con.execute("SELECT * FROM runs ORDER BY id DESC")]
+            for row in rows:
+                row["artifacts"] = json.loads(row["artifacts"])
+            return rows
+
+    @app.post("/api/runs", status_code=201)
+    async def create_run_endpoint(request: Request):
+        p = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            return control.start_run(manager, con, p)
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: int):
+        with closing(manager.db()) as con:
+            run = manager.row(con, "runs", run_id)
+            run["artifacts"] = json.loads(run["artifacts"])
+            return run
+
+    @app.get("/api/runs/{run_id}/logs")
+    def get_run_logs(run_id: int):
+        with closing(manager.db()) as con:
+            run = manager.row(con, "runs", run_id)
+            return {"text": run["logs"]}
+
+    @app.get("/api/runs/{run_id}/artifacts")
+    def get_run_artifacts(run_id: int):
+        with closing(manager.db()) as con:
+            run = manager.row(con, "runs", run_id)
+            return json.loads(run["artifacts"])
+
+    @app.get("/api/runs/{run_id}/package")
+    def get_run_package(run_id: int):
+        with closing(manager.db()) as con:
+            run = manager.row(con, "runs", run_id)
+            return json.loads(run["package"])
+
+    @app.post("/api/runs/{run_id}/publish")
+    def publish_run_endpoint(run_id: int):
+        with closing(manager.db()) as con, con:
+            run = manager.row(con, "runs", run_id)
+            if run["status"] != "REVIEW":
+                raise ValueError("Run is not ready for delivery")
+            con.execute("UPDATE runs SET delivery_status='pending',delivery_error=NULL WHERE id=? AND delivery_status='failed'", (run["id"],))
+            return {"ok": True}
+
+    @app.post("/api/runs/{run_id}/answer")
+    async def answer_run(run_id: int, request: Request):
+        p = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            run = manager.row(con, "runs", run_id)
+            node = manager.row(con, "nodes", run["node_id"])
+            if run["status"] != "NEEDS_INPUT":
+                raise ValueError("run is not waiting for input")
+            state = runner_call(node, "POST", "/runs/%s/answer" % run_id, p)
+            con.execute("UPDATE runs SET status=?,question=NULL,updated_at=? WHERE id=?",
+                        (state["status"], now(), run_id))
+            con.execute("UPDATE tasks SET status='RUNNING',updated_at=? WHERE id=?", (now(), run["task_id"]))
+            return state
+
+    @app.post("/api/runs/{run_id}/cancel")
+    def cancel_run(run_id: int):
+        with closing(manager.db()) as con, con:
+            run = manager.row(con, "runs", run_id)
+            node = manager.row(con, "nodes", run["node_id"])
+            state = runner_call(node, "POST", "/runs/%s/cancel" % run_id, {})
+            con.execute("UPDATE runs SET status=?,commit_sha=?,finished_at=?,cleaned_at=?,updated_at=? WHERE id=?",
+                (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
+            task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
+            con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            return state
+
+    @app.post("/api/runs/{run_id}/cleanup")
+    def cleanup_run(run_id: int):
+        with closing(manager.db()) as con, con:
+            run = manager.row(con, "runs", run_id)
+            node = manager.row(con, "nodes", run["node_id"])
+            state = runner_call(node, "POST", "/runs/%s/cleanup" % run_id, {})
+            con.execute("UPDATE runs SET status=?,commit_sha=?,finished_at=?,cleaned_at=?,updated_at=? WHERE id=?",
+                (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
+            task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
+            con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            return state
+
+    @app.post("/api/runs/{run_id}/review")
+    async def review_run(run_id: int, request: Request):
+        p = await get_payload(request)
+        with closing(manager.db()) as con, con:
+            run = manager.row(con, "runs", run_id)
+            node = manager.row(con, "nodes", run["node_id"])
+            control.review_delivery(manager, con, run, node, p)
+            state = runner_call(node, "POST", "/runs/%s/review" % run_id, p)
+            con.execute("UPDATE runs SET status=?,commit_sha=?,finished_at=?,cleaned_at=?,updated_at=? WHERE id=?",
+                (state["status"], state.get("commit_sha"), state.get("finished_at"), state.get("cleaned_at"), now(), run_id))
+            task_status = {"SUCCEEDED": "DONE", "REJECTED": "REJECTED", "CANCELLED": "CANCELLED"}.get(state["status"], state["status"])
+            con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (task_status, now(), run["task_id"]))
+            return state
+
+    return app
 
 
 def poll(db_path):
@@ -579,20 +869,24 @@ def main():
             import control
             control.migrate(con)
         threading.Thread(target=poll, args=(Manager.db_path,), daemon=True).start()
-        handler = Manager
+        print("%s listening on http://%s:%s" % (args.mode, args.host, args.port), flush=True)
+        app = create_manager_app(Manager.db_path)
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     else:
-        Runner.root = Path(args.root).resolve()
-        Runner.root.mkdir(parents=True, exist_ok=True)
-        (Runner.root / "runs").mkdir(exist_ok=True)
-        (Runner.root / "worktrees").mkdir(exist_ok=True)
-        (Runner.root / "repos").mkdir(exist_ok=True)
-        Runner.token = Path(args.token_file).read_text().strip() if args.token_file else args.token
-        if not Runner.token:
+        root = Path(args.root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "runs").mkdir(exist_ok=True)
+        (root / "worktrees").mkdir(exist_ok=True)
+        (root / "repos").mkdir(exist_ok=True)
+        token = Path(args.token_file).read_text().strip() if args.token_file else args.token
+        if not token:
             parser.error("runner requires --token or --token-file")
+        Runner.root = root
+        Runner.token = token
         Runner.agent_access = args.agent_access
-        handler = Runner
-    print("%s listening on http://%s:%s" % (args.mode, args.host, args.port), flush=True)
-    ThreadingHTTPServer((args.host, args.port), handler).serve_forever()
+        print("%s listening on http://%s:%s" % (args.mode, args.host, args.port), flush=True)
+        app = create_runner_app(root, token, args.agent_access)
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":
