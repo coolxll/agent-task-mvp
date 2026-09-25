@@ -3,7 +3,7 @@
 ## 已准备
 
 - 主机：`wujie`（远端主机名 `SH-4631`）。
-- 项目目录：`/home/coolx/workspace/personal/agent-task-mvp`，从 GitHub `main` 检出，HEAD 为 `f859cd848af1830bdf0c6986726b9a18b8028974`。
+- 项目目录：`/home/coolx/workspace/personal/agent-task-mvp`，从 GitHub `main` 检出；初始检出 HEAD 为 `f859cd848af1830bdf0c6986726b9a18b8028974`，此后通过 `git pull --ff-only` 同步。
 - Python：系统 `/usr/bin/python3` 为 3.12.3；使用 `/home/coolx/.local/bin/uv` 创建项目内 `.venv`，依照 `requirements.txt` 安装依赖。没有把依赖安装到系统 Python。
 - Git：提交身份已配置；项目局部 `core.autocrlf=input`，检出文件为 LF，工作树干净。
 - 验证：`.venv/bin/python -m unittest discover -s tests -v`，38 项通过。
