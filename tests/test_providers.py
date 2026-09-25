@@ -13,12 +13,14 @@ from pipeline import Plan
 class ProviderTests(unittest.TestCase):
     def test_registered_providers(self):
         kinds = agent_drivers.available_kinds()
+        self.assertIn("acp", kinds)
         self.assertIn("antigravity", kinds)
         self.assertIn("claude", kinds)
         self.assertIn("codex", kinds)
         self.assertIn("pi", kinds)
 
     def test_get_driver(self):
+        self.assertIs(agent_drivers.get_driver("acp"), agent_drivers.AcpDriver)
         self.assertIs(agent_drivers.get_driver("antigravity"), agent_drivers.AntigravityDriver)
         self.assertIs(agent_drivers.get_driver("claude"), agent_drivers.ClaudeDriver)
         self.assertIs(agent_drivers.get_driver("codex"), agent_drivers.CodexDriver)

@@ -5,4 +5,6 @@ __pycache__/
 data/
 *.log
 .venv/
+.venv312/
+.acp/
 reference/

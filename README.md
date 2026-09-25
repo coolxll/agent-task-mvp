@@ -6,7 +6,7 @@ A local Manager and remote Runner for an Agent-driven coding workflow. In the we
 
 ## Quick start
 
-On `corp172-dev`, copy `app.py`, `agent_drivers.py`, `control.py`, `pipeline.py`, `git_io.py`, `requirements.txt`, `ui.html`, `ui.zh-CN.html`, and `ui.js` to `/workspace/agent-task-mvp`. Create a private token file, install dependencies, and run:
+On `corp172-dev`, copy `app.py`, `agent_drivers.py`, `acp_bridge.py`, `control.py`, `pipeline.py`, `git_io.py`, `requirements.txt`, `ui.html`, `ui.zh-CN.html`, and `ui.js` to `/workspace/agent-task-mvp`. Use Python 3.10–3.14. Create a private token file, install dependencies, and run:
 
 ```sh
 python3 -m venv /workspace/agent-task-mvp/.venv
@@ -18,7 +18,7 @@ python3 -m venv /workspace/agent-task-mvp/.venv
   --agent-access full
 ```
 
-The access setting is specific to the current `corp172-dev` container, which cannot run Codex's normal `workspace-write` sandbox. Use trusted code there. `AgentDriver` is the workflow boundary; Codex is the only registered implementation in this version.
+The access setting is specific to the current `corp172-dev` container, which cannot run Codex's normal `workspace-write` sandbox. Use trusted code there. `AgentDriver` is the workflow boundary. For ACP, install `@agentclientprotocol/codex-acp@1.13.1` and set `ACP_AGENT_COMMAND` to its executable in the Runner environment; the task can then select `acp`.
 
 On the Mac, keep an SSH port forward running and start Manager:
 

@@ -417,7 +417,50 @@ class PiDriver:
                 pass
 
 
+class AcpDriver:
+    """ACP lifecycle adapter; JSON-RPC is handled by the official SDK bridge."""
+
+    @staticmethod
+    def start(prompt, workspace, result_path, log, access, session_id=None, readonly=False, schema=None):
+        import sys
+        prompt_file = Path(result_path).with_suffix('.prompt.txt')
+        prompt_file.write_text(prompt)
+        command = [sys.executable, '-u', str(Path(__file__).with_name('acp_bridge.py')),
+                   '--workspace', str(workspace), '--prompt-file', str(prompt_file),
+                   '--result-path', str(result_path), '--access', access]
+        if session_id:
+            command.extend(['--session-id', session_id])
+        if readonly:
+            command.append('--readonly')
+        if schema:
+            command.append('--structured')
+        proc = subprocess.Popen(command, cwd=workspace, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True)
+        return AgentProcessHandle(proc)
+
+    @staticmethod
+    def session_id(log_path, offset, result_path=None):
+        with Path(log_path).open() as stream:
+            stream.seek(offset)
+            for line in stream:
+                if line.startswith('[acp.session] '):
+                    return line.split(' ', 1)[1].strip()
+        return None
+
+    @staticmethod
+    def result(result_path):
+        return Path(result_path).read_text()
+
+    @staticmethod
+    def cancel(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 DRIVERS = {
+    "acp": AcpDriver,
     "antigravity": AntigravityDriver,
     "claude": ClaudeDriver,
     "codex": CodexDriver,
