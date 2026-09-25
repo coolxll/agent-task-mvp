@@ -14,6 +14,7 @@ Manager 使用 Python 3.10–3.14 的环境安装 `requirements.txt`。Mac 已�
 | 业务校验 | TestModel 给出的循环依赖被拒绝 |
 | 缺少模型配置 | `/api/submit` 返回 `FAILED` Run；错误和 Task 状态保存在 SQLite，可在运行列表查看 |
 | 计划交接 | 模拟 PydanticAI 输出经 Manager 任务包送达 Runner；Runner 跳过远端规划并完成 Review，规划阶段标记 `source=manager` |
+| 并发提交 | Planner 等待模型前提交短事务；另一请求仍可创建 Task，无 SQLite 写锁超时 |
 | 原有路径 | 未选择本地规划时继续使用远端 Planner；全部回归测试通过 |
 | 真实模型 | Pi 配置的 DeepSeek Flash 返回合法结构化计划；本地隔离 Git fixture 可用 |
 | 远端完整闭环 | 隔离 Mac Manager 调用本地 Planner 生成 5 步计划，`corp172-dev` ACP Runner 完成实现、Agent 评审、Gate、diff 与 bundle 回传，Run 进入 `REVIEW`；测试 Run 的 Reject 清理成功 |

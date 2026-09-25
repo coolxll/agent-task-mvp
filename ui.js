@@ -100,6 +100,7 @@ const errorName = value => {
 let current = 'tasks';
 let selectedRun = null;
 let eventStream = null;
+let selectedDeliveryPending = false;
 
 async function api(path, method = 'GET', body) {
   const response = await fetch('/api' + path, {
@@ -318,6 +319,7 @@ async function details(id) {
   ]);
   const target = document.getElementById('detail');
   if (!target || selectedRun !== id) return;
+  selectedDeliveryPending = run.status === 'REVIEW' && ['pending','publishing'].includes(run.delivery_status);
   const ready = !art.pipeline_version || (art.ready_to_merge && ['ready','merged'].includes(run.delivery_status));
   const safePr = /^https:\/\/github\.com\//.test(run.pr_url || '') ? run.pr_url : '';
   target.innerHTML = `<h2>${t('run')} #${id}</h2><p id="run-status">${esc(stageName(run.stage || run.status))} ${esc(errorName(run.error))}</p>
@@ -397,6 +399,6 @@ document.querySelectorAll('nav button[data-view]').forEach(button => button.oncl
 show('tasks');
 setInterval(() => {
   if (document.activeElement?.closest?.('#answer-form')) return;
-  if (eventStream && selectedRun) return;
+  if (eventStream && selectedRun && !selectedDeliveryPending) return;
   if (current === 'running' || current === 'review') show(current);
 }, 5000);
