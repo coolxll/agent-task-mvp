@@ -11,7 +11,8 @@
 
 - 本地完整工作流测试检查 `REVIEW` 状态事件、规划日志事件、递增 ID，以及 SSE 从指定 ID 返回下一事件。并发测试确认本地 Planner 等待模型时不会锁住 SQLite 的另一笔写入。
 - `node --check ui.js` 通过；本机 `.venv312/bin/python -m unittest discover -s tests -v` 全部通过。
+- 隔离 Manager 中以 Chrome headless 打开中文任务、运行和交付验收页面；页面正常渲染，运行详情的事件时间线显示阶段状态及 ACP 工具事件。检查截图保存在 `/tmp/agent-task-running-qa.png` 和 `/tmp/agent-task-review-qa.png`。
 
 ## 限制
 
-事件延迟由 Manager 原有 2 秒轮询决定。页面断线后能从持久化事件补读；超过最近 1000 条的历史仍可通过分页 API 或原始日志读取。ACP 工具事件取自适配器日志，其他 Agent 目前只有阶段与文本日志事件。尚未做浏览器视觉验收。
+事件延迟由 Manager 原有 2 秒轮询决定。页面断线后能从持久化事件补读；超过最近 1000 条的历史仍可通过分页 API 或原始日志读取。ACP 工具事件取自适配器日志，其他 Agent 目前只有阶段与文本日志事件。
