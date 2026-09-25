@@ -1,6 +1,8 @@
 const zh = document.documentElement.lang.startsWith('zh');
 const labels = {
   en: {
+    board: 'Kanban Board', colTodo: 'To Do', colRunning: 'In Progress', colNeedsInput: 'Needs Input', colReview: 'Ready for Review', colDone: 'Done',
+    emptyCol: 'No tasks', openNewTask: '+ New Task', viewDetail: 'Details', answerPrompt: 'Answer', refresh: 'Refresh',
     tasks: 'Tasks', running: 'Running', review: 'Review', setup: 'Setup',
     newTask: 'New Task', createRun: 'Create and Run', createProject: 'Create Project',
     createWorkspace: 'Create Workspace', createNode: 'Add Node', projects: 'Projects',
@@ -25,7 +27,9 @@ const labels = {
     taskState: {TODO:'Todo',PENDING:'Pending',PROVISIONING:'Preparing workspace',RUNNING:'Running',VERIFYING:'Verifying',NEEDS_INPUT:'Needs your input',REVIEW:'Delivery acceptance',SUCCEEDED:'Accepted',DONE:'Done',FAILED:'Failed',CANCELLED:'Cancelled',REJECTED:'Rejected'},
   },
   zh: {
-    tasks: '任务', running: '执行流程', review: '交付验收', setup: '配置',
+    board: '任务看板', colTodo: '待办 (To Do)', colRunning: '执行中 (In Progress)', colNeedsInput: '等待补充信息 (Blocked)', colReview: '待交付验收 (Review)', colDone: '已完成 (Done)',
+    emptyCol: '暂无任务', openNewTask: '+ 新建任务', viewDetail: '查看详情', answerPrompt: '去回答', refresh: '刷新',
+    tasks: '新建/列表', running: '执行流程', review: '交付验收', setup: '配置',
     newTask: '新建任务', createRun: '创建并运行', createProject: '创建项目',
     createWorkspace: '创建工作区', createNode: '添加节点', projects: '项目',
     nodes: '节点', workspaces: '工作区', project: '项目', node: '节点',
@@ -97,7 +101,7 @@ const errorName = value => {
   if (s.includes('unauthorized')) return 'Runner token 无效：' + s;
   return s;
 };
-let current = 'tasks';
+let current = 'board';
 let selectedRun = null;
 let eventStream = null;
 let selectedDeliveryPending = false;
@@ -136,10 +140,242 @@ async function show(view = current) {
     if (view === 'setup') renderSetup(app, data);
     else if (view === 'tasks') renderTasks(app, data);
     else if (view === 'running') renderRunning(app, data);
-    else renderReview(app, data);
+    else if (view === 'review') renderReview(app, data);
+    else renderBoard(app, data);
     if ((view === 'running' || view === 'review') && selectedRun) await details(selectedRun);
   } catch (error) {
     document.getElementById('app').innerHTML = `<section class="bad">${esc(errorName(error.message))}</section>`;
+  }
+}
+
+function renderBoard(app, {projects, nodes, workspaces, tasks, runs, agents}) {
+  const projectMap = Object.fromEntries(projects.map(x => [x.id, x]));
+  const nodeMap = Object.fromEntries(nodes.map(x => [x.id, x]));
+
+  const latestRunByTask = {};
+  runs.forEach(r => {
+    if (!latestRunByTask[r.task_id] || r.id > latestRunByTask[r.task_id].id) {
+      latestRunByTask[r.task_id] = r;
+    }
+  });
+
+  const cols = {
+    todo: [],
+    running: [],
+    needsInput: [],
+    review: [],
+    done: [],
+  };
+
+  tasks.forEach(task => {
+    const run = latestRunByTask[task.id];
+    if (!run || task.status === 'TODO') {
+      cols.todo.push({task, run});
+    } else if (['PENDING', 'PROVISIONING', 'RUNNING', 'VERIFYING'].includes(run.status)) {
+      cols.running.push({task, run});
+    } else if (run.status === 'NEEDS_INPUT') {
+      cols.needsInput.push({task, run});
+    } else if (run.status === 'REVIEW') {
+      cols.review.push({task, run});
+    } else {
+      cols.done.push({task, run});
+    }
+  });
+
+  function renderCard({task, run}) {
+    const pName = projectMap[task.project_id]?.name || 'Project #' + task.project_id;
+    const nName = run ? (nodeMap[run.node_id]?.name || 'Node #' + run.node_id) : '';
+    const statusClass = run ? (
+      run.status === 'NEEDS_INPUT' ? 'card-needs-input' :
+      run.status === 'REVIEW' ? 'card-review-border' :
+      ['RUNNING','PROVISIONING','PENDING','VERIFYING'].includes(run.status) ? 'card-running' : ''
+    ) : '';
+    const stageBadge = run?.stage ? `<span class="badge badge-stage">${esc(stageName(run.stage))}</span>` : '';
+    const statusBadge = run ? `<span class="badge ${run.status === 'NEEDS_INPUT' ? 'badge-blocked' : run.status === 'REVIEW' ? 'badge-review' : 'badge-node'}">${esc(stateName(run.status))}</span>` : `<span class="badge badge-done">${esc(stateName(task.status))}</span>`;
+    const questionSnippet = run?.status === 'NEEDS_INPUT' && run.question ? `<p class="bad" style="font-size:12px;margin:3px 0;line-height:1.3"><strong>Q:</strong> ${esc(run.question.slice(0, 80))}${run.question.length > 80 ? '...' : ''}</p>` : '';
+    const errorSnippet = run?.error ? `<p class="bad" style="font-size:12px;margin:2px 0">${esc(errorName(run.error).slice(0, 60))}</p>` : '';
+    const descSnippet = task.description ? `<div class="card-desc">${esc(task.description)}</div>` : '';
+
+    return `
+      <div class="kanban-card ${statusClass}" data-card-task="${task.id}" ${run ? `data-card-run="${run.id}"` : ''}>
+        <div class="card-top">
+          <span class="card-id">#${task.id}</span>
+          <span class="muted" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pName)}</span>
+        </div>
+        <div class="card-title">${esc(task.title || task.description.slice(0, 50))}</div>
+        ${descSnippet}
+        ${questionSnippet}
+        ${errorSnippet}
+        <div class="card-tags">
+          ${statusBadge}
+          ${stageBadge}
+          ${nName ? `<span class="badge badge-node">${esc(nName)} · ${esc(run.agent_kind || '')}</span>` : ''}
+        </div>
+        <div class="card-footer">
+          <span class="muted">${esc((task.created_at || '').slice(11, 16))}</span>
+          <div>
+            ${run ? `<button type="button" class="card-btn" data-detail="${run.id}">${t('viewDetail')}</button>` : ''}
+            ${run?.status === 'NEEDS_INPUT' ? `<button type="button" class="card-btn btn-primary" data-detail="${run.id}">${t('answerPrompt')}</button>` : ''}
+            ${run?.status === 'REVIEW' ? `<button type="button" class="card-btn btn-primary" data-detail="${run.id}">${t('review')}</button>` : ''}
+            ${['TODO','FAILED','REJECTED','CANCELLED'].includes(task.status) || (run && ['FAILED','CANCELLED'].includes(run.status)) ? `<button type="button" class="card-btn" data-rerun="${task.id}">${t('rerun')}</button>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCol(colKey, title, items) {
+    return `
+      <div class="kanban-col" data-col="${colKey}">
+        <div class="kanban-col-header">
+          <span>${title}</span>
+          <span class="kanban-count">${items.length}</span>
+        </div>
+        <div class="kanban-cards">
+          ${items.length ? items.map(renderCard).join('') : `<div class="kanban-empty">${t('emptyCol')}</div>`}
+        </div>
+      </div>
+    `;
+  }
+
+  app.innerHTML = `
+    <div class="board-toolbar">
+      <div><h2>${t('board')}</h2></div>
+      <div>
+        <button type="button" class="btn-primary" id="open-new-task">${t('openNewTask')}</button>
+        <button type="button" id="refresh-board">${t('refresh')}</button>
+      </div>
+    </div>
+    <div class="kanban-grid">
+      ${renderCol('todo', t('colTodo'), cols.todo)}
+      ${renderCol('running', t('colRunning'), cols.running)}
+      ${renderCol('needsInput', t('colNeedsInput'), cols.needsInput)}
+      ${renderCol('review', t('colReview'), cols.review)}
+      ${renderCol('done', t('colDone'), cols.done)}
+    </div>
+    <dialog id="detail-modal">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">${t('viewDetail')}</h2>
+        <button type="button" id="close-detail-modal">${t('close')}</button>
+      </div>
+      <div id="detail"></div>
+    </dialog>
+    <dialog id="new-task-dialog">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h2 style="margin:0">${t('newTask')}</h2>
+        <button type="button" id="close-new-task-dialog">${t('close')}</button>
+      </div>
+      <p class="muted">${t('taskHelp')}</p>
+      ${(!projects.length || !nodes.length) ? `<p class="bad">${t('needSetup')}</p>` : ''}
+      <form id="task-modal-form">
+        <label>${t('directory')}<select name="project_id" id="modal-task-project" required>${options(projects, x => x.local_path || x.name + ' · ' + (x.repo_url || x.source_path))}</select></label>
+        <button type="button" id="modal-browse-folder">${t('browse')}</button><span id="modal-folder-note" class="muted" style="margin-left:8px"></span>
+        <label>${t('node')}<select name="node_id" id="modal-task-node" required>${options(nodes, x => x.name)}</select></label>
+        <label>${t('agent')}<select name="agent_kind" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
+        <label>${t('planner')}<select name="planner"><option value="remote">${t('remotePlanner')}</option><option value="manager">${t('managerPlanner')}</option></select></label>
+        <label>${t('requirement')}<textarea name="requirement" rows="8" required placeholder="${zh ? '例如：为导出功能增加 CSV 格式，保留现有 JSON 行为，并补充测试。' : 'For example: add CSV export, preserve JSON behavior, and add tests.'}"></textarea></label>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+          <button type="button" id="cancel-new-task">${t('close')}</button>
+          <button type="submit" class="btn-primary" ${(!projects.length || !nodes.length) ? 'disabled' : ''}>${t('createRun')}</button>
+        </div>
+      </form>
+    </dialog>
+  `;
+
+  const taskDialog = document.getElementById('new-task-dialog');
+  const detailModal = document.getElementById('detail-modal');
+
+  document.getElementById('open-new-task').onclick = () => taskDialog.showModal();
+  document.getElementById('close-new-task-dialog').onclick = () => taskDialog.close();
+  document.getElementById('cancel-new-task').onclick = () => taskDialog.close();
+  document.getElementById('refresh-board').onclick = () => show('board');
+
+  document.getElementById('close-detail-modal').onclick = () => {
+    detailModal.close();
+    if (eventStream) { eventStream.close(); eventStream = null; }
+    selectedRun = null;
+    show('board');
+  };
+  detailModal.onclose = () => {
+    if (eventStream) { eventStream.close(); eventStream = null; }
+    selectedRun = null;
+    show('board');
+  };
+
+  document.getElementById('modal-browse-folder').onclick = () => browseFolder(async project => {
+    const requirement = document.querySelector('#task-modal-form [name=requirement]').value;
+    const node = document.getElementById('modal-task-node').value;
+    await show('board');
+    const td = document.getElementById('new-task-dialog');
+    td.showModal();
+    document.getElementById('modal-task-project').value = project.id;
+    document.getElementById('modal-task-node').value = node;
+    document.querySelector('#task-modal-form [name=requirement]').value = requirement;
+    document.getElementById('modal-folder-note').textContent = project.dirty ? t('dirty') : project.local_path;
+  });
+
+  document.getElementById('task-modal-form').onsubmit = async event => {
+    event.preventDefault();
+    const body = formData(event.target);
+    const button = event.target.querySelector('button[type=submit]');
+    button.disabled = true;
+    try {
+      const result = await api('/submit', 'POST', {
+        project_id: Number(body.project_id),
+        node_id: Number(body.node_id),
+        agent_kind: body.agent_kind,
+        planner: body.planner,
+        requirement: body.requirement,
+      });
+      taskDialog.close();
+      selectedRun = result.id;
+      await show('board');
+      openDetailModal(result.id);
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  document.querySelectorAll('[data-card-run]').forEach(card => {
+    card.onclick = event => {
+      if (event.target.tagName === 'BUTTON') return;
+      openDetailModal(Number(card.dataset.cardRun));
+    };
+  });
+
+  document.querySelectorAll('[data-detail]').forEach(button => {
+    button.onclick = event => {
+      event.stopPropagation();
+      openDetailModal(Number(button.dataset.detail));
+    };
+  });
+
+  document.querySelectorAll('[data-rerun]').forEach(button => {
+    button.onclick = async event => {
+      event.stopPropagation();
+      const taskId = Number(button.dataset.rerun);
+      const previous = runs.find(x => x.task_id === taskId);
+      if (!previous) return;
+      const result = await api('/runs', 'POST', {
+        task_id: taskId,
+        node_id: previous.node_id,
+        agent_kind: previous.agent_kind,
+      });
+      selectedRun = result.id;
+      await show('board');
+      openDetailModal(result.id);
+    };
+  });
+}
+
+function openDetailModal(runId) {
+  const detailModal = document.getElementById('detail-modal');
+  if (detailModal) {
+    if (!detailModal.open) detailModal.showModal();
+    details(runId);
+  } else {
+    selectedRun = runId;
+    show('running');
   }
 }
 
@@ -346,7 +582,10 @@ async function details(id) {
   if (answerForm) answerForm.onsubmit = async event => {
     event.preventDefault();
     const button = answerForm.querySelector('button'); button.disabled = true;
-    try { await api('/runs/' + id + '/answer', 'POST', {answer:answerForm.elements.answer.value}); await show('running'); }
+    try {
+      await api('/runs/' + id + '/answer', 'POST', {answer:answerForm.elements.answer.value});
+      await details(id);
+    }
     finally { button.disabled = false; }
   };
   if (retry) retry.onclick = async () => { await api('/runs/' + id + '/publish','POST',{}); await details(id); };
@@ -354,7 +593,12 @@ async function details(id) {
     const button = document.getElementById(decision);
     if (button) button.onclick = async () => {
       button.disabled = true;
-      try { await api('/runs/' + id + '/review','POST',{decision}); await show('review'); }
+      try {
+        await api('/runs/' + id + '/review','POST',{decision});
+        const detailModal = document.getElementById('detail-modal');
+        if (detailModal?.open) detailModal.close();
+        await show(current);
+      }
       finally { button.disabled = false; }
     };
   }
@@ -385,7 +629,9 @@ function openRunStream(id, after) {
     if (item.kind === 'status') {
       const status = document.getElementById('run-status');
       if (status) status.textContent = `${stageName(item.data.stage || item.data.status)} ${errorName(item.data.error)}`;
-      if (['NEEDS_INPUT','REVIEW','FAILED','SUCCEEDED','REJECTED','CANCELLED'].includes(item.data.status)) show(current);
+      if (['NEEDS_INPUT','REVIEW','FAILED','SUCCEEDED','REJECTED','CANCELLED'].includes(item.data.status)) {
+        if (!document.getElementById('detail-modal')?.open) show(current);
+      }
     }
   };
 }
@@ -396,9 +642,9 @@ document.querySelectorAll('nav button[data-view]').forEach(button => button.oncl
   selectedRun = null;
   show(button.dataset.view);
 });
-show('tasks');
+show('board');
 setInterval(() => {
-  if (document.activeElement?.closest?.('#answer-form')) return;
+  if (document.activeElement?.closest?.('#answer-form') || document.activeElement?.closest?.('#task-modal-form') || document.activeElement?.closest?.('#task-form')) return;
   if (eventStream && selectedRun && !selectedDeliveryPending) return;
-  if (current === 'running' || current === 'review') show(current);
+  if (current === 'board' || current === 'running' || current === 'review') show(current);
 }, 5000);
