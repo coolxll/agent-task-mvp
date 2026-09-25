@@ -16,15 +16,16 @@
 
 ## 安装与连接
 
-要求 Mac 有 Python 3、Git；远端有 Python 3、Git 和已登录的 `codex` CLI。两端用 `requirements.txt` 安装 Pydantic，用于校验 Agent 的计划、代码评审和验收输出。若要创建与合并 GitHub PR，Mac 还需要 GitHub CLI `gh` 登录并具有目标仓库的推送与合并权限。`corp172-dev` 不需要 GitHub 写权限。
+要求 Mac 与远端有 Python 3.10–3.14 和 Git；远端 ACP 模式还需要 Node.js、可用的 Codex 登录态和 `codex-acp` 适配器。两端用 `requirements.txt` 安装依赖。若要创建与合并 GitHub PR，Mac 还需要 GitHub CLI `gh` 登录并具有目标仓库的推送与合并权限。`corp172-dev` 不需要 GitHub 写权限。
 
 第一次使用，在远端放置运行文件，并生成仅 Runner 使用的访问 token。已有 token 不要覆盖：
 
 ```sh
 ssh corp172-dev 'mkdir -p /workspace/agent-task-mvp && chmod 700 /workspace/agent-task-mvp'
-scp app.py agent_drivers.py control.py pipeline.py git_io.py ui.html ui.zh-CN.html ui.js corp172-dev:/workspace/agent-task-mvp/
+scp app.py agent_drivers.py acp_bridge.py control.py pipeline.py git_io.py ui.html ui.zh-CN.html ui.js corp172-dev:/workspace/agent-task-mvp/
 scp requirements.txt corp172-dev:/workspace/agent-task-mvp/
 ssh corp172-dev 'python3 -m venv /workspace/agent-task-mvp/.venv && /workspace/agent-task-mvp/.venv/bin/python -m pip install -r /workspace/agent-task-mvp/requirements.txt'
+ssh corp172-dev 'npm install --prefix /workspace/agent-task-mvp/.acp --no-save @agentclientprotocol/codex-acp@1.13.1'
 ssh corp172-dev 'python3 - <<'"'"'PY'"'"'
 from pathlib import Path
 import secrets
@@ -38,6 +39,7 @@ PY'
 在远端运行：
 
 ```sh
+ACP_AGENT_COMMAND=/workspace/agent-task-mvp/.acp/node_modules/.bin/codex-acp \
 /workspace/agent-task-mvp/.venv/bin/python /workspace/agent-task-mvp/app.py runner \
   --root /workspace/agent-task-mvp/data \
   --token-file /workspace/agent-task-mvp/token \
@@ -57,9 +59,9 @@ ssh -N -L 18766:127.0.0.1:8766 corp172-dev
 
 ```sh
 cd /Users/lynn/workspace/projects/agent-task-mvp
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python app.py manager --db manager.sqlite3 --host 127.0.0.1 --port 18765
+uv venv --python 3.12 .venv312
+uv pip install --python .venv312/bin/python -r requirements.txt
+.venv312/bin/python app.py manager --db manager.sqlite3 --host 127.0.0.1 --port 18765
 ```
 
 在“配置”添加节点，名称 `corp172-dev`，地址 `http://127.0.0.1:18766`，token 从远端 `/workspace/agent-task-mvp/token` 读取。现有节点不必重复添加。Manager 默认仅监听本机回环地址；**不要直接暴露 Manager 端口到公网**，因为目录浏览与项目管理接口供本机用户使用。

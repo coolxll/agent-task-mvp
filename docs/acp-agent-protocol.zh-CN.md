@@ -17,9 +17,9 @@ Runner  ──(启动子进程)──>  codex / claude / agy -p "需求说明"  
 | 痛点维度 | 命令行模式 (CLI `-p` + stdout 抓取) | 原生协议模式 (ACP / RPC) |
 | :--- | :--- | :--- |
 | **可观测性** | 依靠解析终端 ANSI 文本输出，容易被进度条、格式化混淆 | 结构化事件流（`tool_call`, `message_update`, `thought_chunk`）实时推送 |
-| **状态与续跑** | 人机交互时盲猜会话 ID，甚至需要文本正则匹配问题 | 协议级 Session ID 与明确的提问（Elicitation）状态机响应 |
-| **执行安全性** | 信任 Agent 自身是否遵守规则（如只读阶段全靠 Prompt 祈祷） | **反向控制**：由 Runner 托管文件系统与终端执行，对越权操作物理拒绝 |
-| **生命周期控制** | 依赖 SIGTERM/SIGKILL 强制杀进程，可能造成文件半写或孤儿进程 | 标准化 `abort` / `cancel` 请求，支持 Agent 优雅析构与清理资源 |
+| **状态与续跑** | 常需解析 Agent 私有输出 | 协议级 Session ID；续跑与提问仍须探测具体 Agent 的能力 |
+| **执行安全性** | 依赖 Agent 本身的权限设置 | ACP 可提供 Client 文件/终端接口，但不能阻止 Agent 直接访问宿主机；仍需 OS 权限边界 |
+| **生命周期控制** | 依赖进程信号 | 支持 Session 取消；当前 Runner 仍用进程组信号取消本次 ACP bridge |
 | **厂商与多模型解耦** | 每接入一家 Agent 就需要写一整套特定的命令行拼装逻辑 | 类似 LSP（语言服务器协议），实现“一次接入，支持所有 ACP 兼容 Agent” |
 
 ---
@@ -62,34 +62,20 @@ sequenceDiagram
     participant Agent as ACP Coding Agent (Guest)
     participant User as Web UI / Manager
 
-    Note over Pipeline,Agent: 阶段 1: 初始化与沙箱准备
+    Note over Pipeline,Agent: 阶段 1: 初始化与 worktree 准备
     Pipeline->>Host: 启动阶段 (如 PLANNING, readonly=True)
-    Host->>Agent: initialize (capabilities: read-only fs, no terminal)
+    Host->>Agent: initialize (不声明 Client FS / Terminal)
     Agent-->>Host: initialize response (capabilities)
     Host->>Agent: session/new (cwd=workspace)
 
     Note over Pipeline,Agent: 阶段 2: 任务下发与流式交互
     Host->>Agent: session/prompt (需求说明 + Output Schema)
-    loop 事件驱动与工具反向调用
+    loop 事件通知
         Agent-->>Host: session_update (thought / plan / message)
-        Host-->>Pipeline: 实时流式记录日志与阶段状态
-        Agent->>Host: fs/read_text_file (path="calculator.py")
-        Host-->>Agent: 文件内容
-        alt Agent 尝试在只读阶段写文件
-            Agent->>Host: fs/write_text_file (path="calculator.py")
-            Host-->>Agent: Error (Permission Denied: read-only stage)
-        end
+        Host-->>Pipeline: 记录日志与工具事件
     end
 
-    Note over Pipeline,User: 阶段 3: 遇到歧义，原生挂起
-    opt Agent 缺少必要信息
-        Agent->>Host: create_elicitation (question="请问目标 Python 版本是？")
-        Host->>Pipeline: 抛出 NeedsInput(question)
-        Pipeline->>User: 状态置为 NEEDS_INPUT
-        User->>Pipeline: 提交回答 "Python 3.11+"
-        Pipeline->>Host: 恢复运行
-        Host->>Agent: complete_elicitation (answer="Python 3.11+")
-    end
+    Note over Pipeline,User: 阶段 3: 当前沿用文本 NEEDS_INPUT 与 session/load 续跑
 
     Note over Pipeline,Agent: 阶段 4: 运行完结与交付
     Agent-->>Host: session_update (AgentMessageChunk: 结构化 JSON 成果)
@@ -98,10 +84,10 @@ sequenceDiagram
 
 ### 核心收益
 
-1. **绝对物理沙箱（Absolute Host-enforced Sandbox）**：
-   在现有的实现中，只读阶段需要依赖 Agent 自己不写文件，并在事后对比 Git `write-tree` 指纹；在 ACP 模式下，Agent **必须通过 Client 提供的 `fs/write_text_file` 写文件**，Runner 在只读阶段直接拒绝对接，模型从物理上不可能污染工作区。
-2. **完美对齐 `NEEDS_INPUT` 交互协议**：
-   ACP 的 `create_elicitation` / `complete_elicitation` 与平台现有的人机提问/解答恢复机制天然契合，使交互逻辑从“文本协议（`NEEDS_INPUT: xxx`）”升级为“类型安全协议”。
+1. **标准化生命周期与事件**：
+   SDK 处理握手、会话、Prompt 和事件通知。ACP 不保证 Agent 只能经 Client 的文件或终端接口操作宿主机；只读阶段仍依赖实际 OS 权限及运行后的 worktree 指纹检查。Full access 不等于沙箱。
+2. **交互能力按实现探测**：
+   当前 ACP Driver 保留文本 `NEEDS_INPUT` 和支持时的 `session/load`。`elicitation/create` 是 Agent 的请求；`elicitation/complete` 是 URL 模式完成通知，不能当作用户回答。表单/URL 请求、等待及断线恢复需要后续独立实现。
 3. **插件式 Agent 生态**：
    Runner 不需要感知当前跑的是 Pi、Claude Code、Codex 还是 Antigravity。只要它们符合 ACP 规范，即可通过同一个 `AcpDriver` 无缝调度。
 
@@ -110,9 +96,9 @@ sequenceDiagram
 ## 四、演进路线规划
 
 - [x] **第一阶段（已完成）**：Multi-provider 架构解耦，实现基于双向 JSONL RPC 的 `PiDriver` (`pi --mode rpc`)，摆脱 CLI `-p` 单次调用的粗糙模式。
-- [ ] **第二阶段（ACP Driver 引入）**：
-  - 基于 `reference/acp-python-sdk` 封装通用的 `AcpDriver`。
-  - 在 Runner 内部实现标准 `Client` 接口，托管 worktree 文件读写与命令执行。
+- [x] **第二阶段（ACP Driver 最小闭环）**：
+  - 使用官方 `agent-client-protocol` Python SDK 的通用 `AcpDriver`，通过环境变量配置 Agent 命令。
+  - `corp172-dev` 的 `@agentclientprotocol/codex-acp` 已验证握手、会话新建/加载、编辑、事件、Gate、Review、拒绝与清理；验收细节见 `acp-acceptance.zh-CN.md`。Client 当前不声明文件/终端托管能力，不能据此声称物理隔离。
 - [ ] **第三阶段（Agent 生态标准化）**：
   - 为不支持原生 ACP 的 CLI（如早期 Codex）配置轻量级 ACP Adapter 包装器。
   - 将 Pi Agent 官方或社区的 ACP 模式接入为平台的开箱即用引擎。
