@@ -1,4 +1,6 @@
 import base64
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -8,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -189,6 +192,46 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unsupported agent kind'):
             self.api('/submit',{'project_id':self.project,'node_id':self.node,
                                 'agent_kind':'unknown','requirement':'Fix addition'})
+
+    def test_03b_unconfigured_manager_planner_persists_failure(self):
+        result = self.api('/submit', {'project_id':self.project,'node_id':self.node,
+            'agent_kind':'codex','planner':'manager','requirement':'Fix addition'})
+        self.assertEqual(result['status'], 'FAILED')
+        self.assertIn('MANAGER_PLANNER_MODEL', result['error'])
+        run = self.api('/runs/'+str(result['id']))
+        self.assertEqual(run['status'], 'FAILED')
+        self.assertEqual(run['error'], result['error'])
+
+    def test_03d_manager_planning_does_not_hold_database_lock(self):
+        from fastapi.testclient import TestClient
+        started, release = threading.Event(), threading.Event()
+        plan = {'summary':'Fix addition', 'steps':[{'id':'fix','title':'Fix addition',
+            'instructions':'Fix add and test it','depends_on':[]}],
+            'acceptance_criteria':['Addition returns a sum'], 'gates':['python3 -m unittest -v']}
+
+        async def slow_plan(*args):
+            started.set()
+            await asyncio.to_thread(release.wait)
+            return plan
+
+        with patch('native_planner.plan_task', new=slow_plan), TestClient(app.create_manager_app(self.db)) as client:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(client.post, '/api/submit', json={
+                    'project_id':self.project,'node_id':self.node,'agent_kind':'codex',
+                    'planner':'manager','requirement':'Fix addition while checking the database lock'})
+                self.assertTrue(started.wait(5))
+                try:
+                    created = self.api('/tasks', {'project_id':self.project,'title':'Concurrent task',
+                        'description':'Persist while Planner is waiting'})
+                    self.assertIn('id', created)
+                finally:
+                    release.set()
+                response = future.result(timeout=20)
+        self.assertEqual(response.status_code, 201, response.text)
+        run_id = response.json()['id']
+        run = self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['status'],'REVIEW',run)
+        self.api('/runs/%s/review'%run_id,{'decision':'reject'})
 
     def test_04_cancel_stops_agent_and_allows_cleanup(self):
         run_id=self.submit('Fix addition SLOW')

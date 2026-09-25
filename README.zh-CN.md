@@ -9,6 +9,7 @@
 1. 确保本机 Manager、到 `corp172-dev` 的 SSH 转发和远端 Runner 在运行。打开中文版 <http://127.0.0.1:18765/zh>。
 2. 在“任务”点击“选择文件夹…”，选一个 **已提交且干净的 Git 仓库**。系统读取路径、Git remote、当前提交与默认分支并创建或复用 Project。原有 Project 也可在下拉框选择。
 3. 选择 `corp172-dev`，在“描述你想完成的需求”写下目标和限制，点击“创建并运行”。标题、验收条件、步骤和测试建议由 Agent 从需求中提取。
+   “规划位置”默认选择远端。要复用 Mac 上 Pi 已配置的 DeepSeek Flash，启动 Manager 前设置 `MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash`，再显式选择本地规划；程序从 `~/.pi/agent/` 读取服务地址与凭据，不复制密钥。计划会随任务包保存，模型错误也会保存为失败 Run。详情见[本地主 Agent 验收](docs/manager-planner-acceptance.zh-CN.md)。
 4. “执行流程”展示准备工作区、规划、实现各步骤、**Agent 代码评审**、测试和验收检查。若 Agent 缺少必要信息，Run 会停在“等待你补充信息”；打开该 Run，回答问题后会用保存的 Codex 会话继续同一阶段。也可取消。
 5. “交付验收”是**用户对最终成果的决定**，不是 Agent 的代码评审。此页展示任务包、规划、代码评审、测试输出、验收证据、改动文件与 diff。满足检查条件时，Mac 已取回结果并显示 PR 链接或本地结果仓库路径。点击验收通过后，GitHub PR 会合并；选择“保留分支”的项目会在 Mac 上保留成果分支。拒绝则关闭已创建的 PR，并清理远端分支和 worktree。
 
@@ -61,7 +62,8 @@ ssh -N -L 18766:127.0.0.1:8766 corp172-dev
 cd /Users/lynn/workspace/projects/agent-task-mvp
 uv venv --python 3.12 .venv312
 uv pip install --python .venv312/bin/python -r requirements.txt
-.venv312/bin/python app.py manager --db manager.sqlite3 --host 127.0.0.1 --port 18765
+MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash \
+  .venv312/bin/python app.py manager --db manager.sqlite3 --host 127.0.0.1 --port 18765
 ```
 
 在“配置”添加节点，名称 `corp172-dev`，地址 `http://127.0.0.1:18766`，token 从远端 `/workspace/agent-task-mvp/token` 读取。现有节点不必重复添加。Manager 默认仅监听本机回环地址；**不要直接暴露 Manager 端口到公网**，因为目录浏览与项目管理接口供本机用户使用。
@@ -79,7 +81,7 @@ uv pip install --python .venv312/bin/python -r requirements.txt
 - Manager 状态在 `manager.sqlite3`；任务包、输入和结果 bundle、Mac 上的结果仓库在 `manager.sqlite3.data/`。Runner 的 worktree、日志、计划和产出在 `--root` 目录。不要把这些运行数据提交到 Git。
 - 每个任务目前选择一台启动机器，Planner 能生成最多 8 个依赖步骤，在该机器顺序执行。跨机器分配与代码交接还没有接入。
 - 工作流依赖 `AgentProvider` / `AgentDriver` 接口，已实现多 Provider 统一适配：默认主力 Provider 为 `antigravity`（基于 Antigravity CLI/SDK，原生支持 `--json-schema` 结构化输出强约束、`--conversation` 原生断点续跑与规划/编辑模式隔离）；轻量兜底 Provider 为 `pi`（派 Agent，采用原生 JSONL RPC 协议 `pi --mode rpc` 双向通信，摆脱脆性的 CLI 命令行文本抓取，具备原生流式事件捕获、Session 原生持久化与 `--tools` 细粒度只读沙箱）；同时支持 `codex` 与 `claude` 驱动。Task 选择 Agent，Run 和任务包保存 `agent_kind`，Runner 按类型实例化驱动。Planner、实现、独立评审与验收各有 Agent 会话；同一阶段需要补充信息时，Runner 保存会话 ID、问题和阶段进度，回答后由驱动续跑，已完成阶段不会重跑。Agent 评审和验收会附证据，最终合并仍由用户在 Web 中决定。
-- 规划、代码评审和验收的结构化输出由 Pydantic 模型生成 JSON Schema 并校验；步骤依赖无环、Gate 非空等业务规则仍由普通代码校验。本体 Planner 目前仍使用所选远端的 Codex，未来独立 Planner 的框架选择见[专项决策](docs/native-agent-framework.zh-CN.md)。
+- 规划、代码评审和验收的结构化输出由 Pydantic 模型生成 JSON Schema 并校验；步骤依赖无环、Gate 非空等业务规则仍由普通代码校验。规划位置默认是所选远端；显式选择 Manager 本地规划时使用 PydanticAI，已用 Pi 配置的 DeepSeek Flash 验证远端完整闭环，见[专项决策](docs/native-agent-framework.zh-CN.md)。
 - PR 自动创建/合并只支持 `github.com` 仓库；其他 Git remote 可以把成果带回 Mac 并保留分支。真实 GitHub PR 需要一个有写权限的项目，当前试验使用本地 Git 仓库，因此验收记录明确区分本地集成验证与外部仓库实测。
 - 本机仓库必须没有已跟踪或未跟踪的改动。Git bundle 输入上限 48 MiB。大型仓库可使用手工配置的远端已有目录；此时选择的是 Runner 上的代码，不会自动包含 Mac 的未提交内容。
 - 等待用户输入时的状态和会话可持久保存；Runner Worker 在执行中异常退出后的自动侦测与恢复、自动修复循环、多 Manager、多节点步骤调度尚未实现。

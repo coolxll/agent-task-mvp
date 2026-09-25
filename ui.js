@@ -49,6 +49,7 @@ const labels = {
   },
 };
 Object.assign(labels.en, {
+  planner:'Planner', remotePlanner:'Plan on selected Node', managerPlanner:'Plan on Manager (requires model API)',
   directory:'Working directory / project', browse:'Choose folder…', requirement:'What would you like to build or fix?',
   taskHelp:'Choose a folder and machine, then describe your goal. The remote agent plans, implements, reviews and tests it.',
   needSetup:'Add a Node in Setup, then choose a Git folder or an existing Project.',
@@ -62,6 +63,7 @@ Object.assign(labels.en, {
   acceptanceHelp:'Code review and tests are part of the remote workflow. Your acceptance confirms the delivered result. For GitHub projects it merges the PR; otherwise it keeps the result branch on this Mac. Rejection closes the PR, if any, and cleans the remote worktree.',
 });
 Object.assign(labels.zh, {
+  planner:'规划位置', remotePlanner:'在所选远端机器规划', managerPlanner:'在 Manager 本地规划（需模型 API）',
   directory:'工作目录 / 项目', browse:'选择文件夹…', requirement:'描述你想完成的需求',
   taskHelp:'选择目录和机器，写下目标。远端 Agent 会规划、实现、评审、测试并生成验收报告。',
   needSetup:'请在配置页添加节点，然后选择一个 Git 文件夹或已有项目。',
@@ -231,6 +233,7 @@ function renderTasks(app, {projects, nodes, tasks, runs, agents}) {
         <button type="button" id="browse-folder">${t('browse')}</button><p id="folder-note" class="muted"></p>
         <label>${t('node')}<select name="node_id" id="task-node" required>${options(nodes, x => x.name)}</select></label>
         <label>${t('agent')}<select name="agent_kind" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
+        <label>${t('planner')}<select name="planner"><option value="remote">${t('remotePlanner')}</option><option value="manager">${t('managerPlanner')}</option></select></label>
         <label>${t('requirement')}<textarea name="requirement" rows="10" required placeholder="${zh ? '例如：为导出功能增加 CSV 格式，保留现有 JSON 行为，并补充测试。' : 'For example: add CSV export, preserve JSON behavior, and add tests.'}"></textarea></label>
         <button ${(!projects.length || !nodes.length) ? 'disabled' : ''}>${t('createRun')}</button>
       </form></section>
@@ -253,7 +256,7 @@ function renderTasks(app, {projects, nodes, tasks, runs, agents}) {
     button.disabled = true;
     try {
       const result = await api('/submit','POST', {project_id:Number(body.project_id), node_id:Number(body.node_id),
-        agent_kind:body.agent_kind, requirement:body.requirement});
+        agent_kind:body.agent_kind, planner:body.planner, requirement:body.requirement});
       selectedRun = result.id;
       await show('running');
     } finally { button.disabled = false; }

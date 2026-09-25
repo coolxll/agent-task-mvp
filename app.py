@@ -675,16 +675,35 @@ def create_manager_app(db_path: Path) -> FastAPI:
         requirement = p.get("requirement", "").strip()
         if not requirement or len(requirement) > 100000:
             raise ValueError("Requirement must contain 1–100000 characters")
+        planner_mode = p.get('planner', 'remote')
+        if planner_mode not in ('remote', 'manager'):
+            raise ValueError('planner must be remote or manager')
         with closing(manager.db()) as con, con:
             project = manager.row(con, "projects", p["project_id"])
-            manager.row(con, "nodes", p["node_id"])
+            node = manager.row(con, "nodes", p["node_id"])
             if project["local_path"] and git_io.inspect_repo(project["local_path"])["dirty"]:
                 raise ValueError("工作目录有未提交改动，请先提交后再运行；系统不会自动修改或忽略这些改动。")
             title = requirement.splitlines()[0][:100]
             cur = con.execute("INSERT INTO tasks(project_id,title,description,acceptance_criteria,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (project["id"], title, requirement, "", "TODO", now(), now()))
-            result = control.start_run(manager, con, {"task_id": cur.lastrowid, "node_id": p["node_id"],
-                                                      "agent_kind": p.get("agent_kind", agent_drivers.default_kind())})
+            task_id = cur.lastrowid
+            # The model call may take minutes; release the SQLite write lock first.
+            con.commit()
+            manager_plan = None
+            if planner_mode == 'manager':
+                try:
+                    import native_planner
+                    manager_plan = await native_planner.plan_task(requirement, project, node)
+                except Exception as exc:
+                    error = 'Manager Planner failed: ' + str(exc)[:2000]
+                    failed = con.execute('INSERT INTO runs(task_id,node_id,agent_kind,status,error,created_at,updated_at) '
+                        'VALUES(?,?,?,?,?,?,?)', (task_id, node['id'], p.get('agent_kind', agent_drivers.default_kind()),
+                                                  'FAILED', error, now(), now()))
+                    con.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE id=?", (now(), task_id))
+                    return {'id': failed.lastrowid, 'task_id': task_id, 'status': 'FAILED', 'error': error}
+            result = control.start_run(manager, con, {"task_id": task_id, "node_id": p["node_id"],
+                "agent_kind": p.get("agent_kind", agent_drivers.default_kind()),
+                "planner": planner_mode, "manager_plan": manager_plan})
             return result
 
     # API: Runs

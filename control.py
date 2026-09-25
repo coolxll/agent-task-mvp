@@ -148,6 +148,7 @@ def start_run(manager, con, p):
     con.execute("UPDATE tasks SET status='RUNNING',updated_at=? WHERE id=?", (now(), task['id']))
     package = {'version': 1, 'task_id': task['id'], 'run_id': run_id, 'requirement': task['description'],
         'agent_kind': agent_kind,
+        'planner': p.get('planner', 'remote'), 'manager_plan': p.get('manager_plan'),
         'source': {'repo_url': project['repo_url'], 'base_branch': base_branch, 'commit': None},
         'node': {'id': node['id'], 'name': node['name']},
         'workflow': ['plan', 'implement', 'code_review', 'test', 'acceptance'],
