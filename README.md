@@ -2,7 +2,7 @@
 
 A local Manager and remote Runner for an Agent-driven coding workflow. In the web UI, choose a local Git folder and an execution node, then describe the requirement in one text box. The Manager snapshots the committed HEAD into a versioned task package and sends a Git bundle to the Runner. Agent sessions plan, implement dependency-ordered steps, review the code, and check acceptance; ordinary code runs the verification gates. The Manager imports the reviewed result back to the Mac. Web approval can fast-forward the selected clean local folder to the reviewed commit. GitHub PR delivery is optional.
 
-[Chinese user guide](README.zh-CN.md) · [Implementation plan](docs/implementation-plan.zh-CN.md) · [Acceptance record](docs/acceptance.zh-CN.md)
+[Chinese user guide](README.zh-CN.md) · [Herdr runner acceptance](docs/herdr-runner-acceptance.zh-CN.md) · [Implementation plan](docs/implementation-plan.zh-CN.md) · [Acceptance record](docs/acceptance.zh-CN.md)
 
 ## Quick start
 
