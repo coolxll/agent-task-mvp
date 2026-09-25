@@ -2,7 +2,7 @@
 
 从 Mac 的网页选择一个 Git 工作目录和远端机器，在一个大文本框里描述需求。Manager 把当前已提交版本封装成任务包送往 Runner；远端 Codex 调查仓库、拆解步骤、实现、独立评审、运行测试并生成验收报告。结果以 Git bundle 回到 Mac。GitHub 项目在所有检查通过后可自动创建 PR；用户在网页验收通过后，Manager 合并 PR 并清理本次远端 worktree。
 
-[实施计划与差距](docs/implementation-plan.zh-CN.md) · [逐项验收记录](docs/acceptance.zh-CN.md) · [本体 Agent 框架选择](docs/native-agent-framework.zh-CN.md) · [目标产品定义](docs/target-mvp.zh-CN.md)
+[实施计划与差距](docs/implementation-plan.zh-CN.md) · [逐项验收记录](docs/acceptance.zh-CN.md) · [交互协议演进 (ACP)](docs/acp-agent-protocol.zh-CN.md) · [本体 Agent 框架选择](docs/native-agent-framework.zh-CN.md) · [目标产品定义](docs/target-mvp.zh-CN.md)
 
 ## 快速体验
 
