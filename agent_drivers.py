@@ -459,11 +459,110 @@ class AcpDriver:
             pass
 
 
+class HerdrDriver:
+    """Herdr multiplexer adapter: executes turns inside persistent Herdr panes."""
+
+    @staticmethod
+    def start(prompt, workspace, result_path, log, access, session_id=None, readonly=False, schema=None):
+        import sys
+        prompt_file = Path(result_path).with_suffix('.prompt.txt')
+        prompt_file.write_text(prompt, encoding='utf-8')
+        command = [
+            sys.executable, '-u', str(Path(__file__).with_name('herdr_bridge.py')),
+            '--workspace', str(workspace),
+            '--prompt-file', str(prompt_file),
+            '--result-path', str(result_path),
+            '--access', access,
+        ]
+        if session_id:
+            command.extend(['--session-id', str(session_id)])
+        if readonly:
+            command.append('--readonly')
+        if schema:
+            command.append('--structured')
+        agent_kind = os.environ.get("HERDR_AGENT_KIND", "claude")
+        command.extend(['--agent-kind', agent_kind])
+
+        proc = subprocess.Popen(
+            command, cwd=workspace, stdin=subprocess.DEVNULL,
+            stdout=log, stderr=log, start_new_session=True
+        )
+        return AgentProcessHandle(proc)
+
+    @staticmethod
+    def session_id(log_path, offset, result_path=None):
+        if log_path and Path(log_path).exists():
+            with Path(log_path).open() as stream:
+                stream.seek(offset)
+                for line in stream:
+                    if line.startswith('[herdr.session] '):
+                        return line.split(' ', 1)[1].strip()
+        return None
+
+    @staticmethod
+    def result(result_path):
+        path = Path(result_path)
+        return path.read_text(encoding='utf-8', errors='replace') if path.exists() else ""
+
+    @staticmethod
+    def cancel(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+class PaseoDriver:
+    """Paseo daemon adapter: dispatches agent turns via the Paseo CLI / daemon."""
+
+    @classmethod
+    def get_binary_path(cls) -> str:
+        paseo_bin = os.environ.get("PASEO_BIN")
+        if paseo_bin and Path(paseo_bin).exists():
+            return str(paseo_bin)
+        return shutil.which("paseo") or "paseo"
+
+    @classmethod
+    def start(cls, prompt, workspace, result_path, log, access, session_id=None, readonly=False, schema=None):
+        cmd = [cls.get_binary_path(), "run", "--cwd", str(workspace)]
+        if access == "full":
+            cmd.extend(["--mode", "bypass"])
+        if schema:
+            schema_json = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema
+            cmd.extend(["--output-schema", json.dumps(schema_json)])
+        cmd.append(prompt)
+
+        out_file = Path(result_path).open("w")
+        proc = subprocess.Popen(
+            cmd, cwd=workspace, stdout=out_file, stderr=log,
+            text=True, start_new_session=True
+        )
+        return AgentProcessHandle(proc, out_file)
+
+    @staticmethod
+    def session_id(log_path, offset, result_path=None):
+        return None
+
+    @staticmethod
+    def result(result_path):
+        path = Path(result_path)
+        return path.read_text(encoding='utf-8', errors='replace') if path.exists() else ""
+
+    @staticmethod
+    def cancel(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 DRIVERS = {
     "acp": AcpDriver,
     "antigravity": AntigravityDriver,
     "claude": ClaudeDriver,
     "codex": CodexDriver,
+    "herdr": HerdrDriver,
+    "paseo": PaseoDriver,
     "pi": PiDriver,
 }
 PROVIDERS = DRIVERS
