@@ -11,6 +11,7 @@
 3. 选择 `corp172-dev`，在“描述你想完成的需求”写下目标和限制，点击“创建并运行”。标题、验收条件、步骤和测试建议由 Agent 从需求中提取。
    “规划位置”默认选择远端。要复用 Mac 上 Pi 已配置的 DeepSeek Flash，启动 Manager 前设置 `MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash`，再显式选择本地规划；程序从 `~/.pi/agent/` 读取服务地址与凭据，不复制密钥。计划会随任务包保存，模型错误也会保存为失败 Run。详情见[本地主 Agent 验收](docs/manager-planner-acceptance.zh-CN.md)。
 4. “执行流程”展示准备工作区、规划、实现各步骤、**Agent 代码评审**、测试和验收检查。若 Agent 缺少必要信息，Run 会停在“等待你补充信息”；打开该 Run，回答问题后会用保存的 Codex 会话继续同一阶段。也可取消。
+   运行详情还提供持久化事件时间线，ACP 工具事件和日志通过 SSE 更新；刷新或断线后可按事件 ID 补读。见[事件流验收](docs/event-stream-acceptance.zh-CN.md)。
 5. “交付验收”是**用户对最终成果的决定**，不是 Agent 的代码评审。此页展示任务包、规划、代码评审、测试输出、验收证据、改动文件与 diff。满足检查条件时，Mac 已取回结果并显示 PR 链接或本地结果仓库路径。点击验收通过后，GitHub PR 会合并；选择“保留分支”的项目会在 Mac 上保留成果分支。拒绝则关闭已创建的 PR，并清理远端分支和 worktree。
 
 仓库有未提交改动时，提交任务会报错并保留原工作树；先自行提交。每个任务固定到提交时的 HEAD，运行中本机继续改代码也不会改变远端任务输入。系统不会 checkout、stash、reset 或清理本机项目目录。
