@@ -1,6 +1,6 @@
 # GitHub 交付安全边界
 
-本文说明当前 `control.py` 与 `app.py` 实现的 GitHub PR 交付检查，以及这些检查已有哪一层证据。这里的“已实现”表示源码中的确定性检查；“本地集成通过”表示测试使用本地 Git 仓库和模拟的 `gh` 响应覆盖了该路径；两者都不等同于真实 GitHub 仓库已经验收。
+本文说明当前 `control.py` 与 `app.py` 实现的 GitHub PR 交付检查，以及这些检查已有哪一层证据。这里的“已实现”表示源码中的确定性检查；“本地集成通过”表示测试使用本地 Git 仓库和模拟的 `gh` 响应覆盖了该路径。真实 GitHub 主路径另有一次受控验收，但仍不能据此推断所有仓库保护策略和故障模式都已覆盖。
 
 ## 发布前固定并核对成果
 
@@ -54,4 +54,13 @@ Runner 完成代码评审、Gate 和验收后，将 worktree 当前 `HEAD` 写�
 
 ### 真实 GitHub 验收状态
 
-本文件不声称已经完成真实 GitHub 验收。本次 Run 被用户批准之前，尚不能以它证明真实仓库中的分支推送、PR 创建、head/base 复核、`--match-head-commit`、保护规则阻挡、合并后状态确认或最终 Runner 清理均已现场通过。真实验收应在隔离的 GitHub 仓库或明确授权的测试 PR 上执行，并单独记录仓库、PR、审核提交、观察到的保护规则结果和清理结果。
+2026-09-26 在 `coolxll/agent-task-mvp` 上完成了一次通过系统自身交付接口执行的真实闭环，而不是在系统外手工合并：
+
+- 隔离环境中的 Task #2 / Run #2 使用真实 Codex 完成实现、独立评审、Gate 和 Agent 验收；第一轮评审发现两处文档错误，自动修复后第二轮通过。
+- Manager 推送审核提交 `a4a5de1150ca05f6d2b8afb5a4c2114173341fcd`，创建 [PR #17](https://github.com/coolxll/agent-task-mvp/pull/17)，并在批准时确认 head 为该提交、base 为 `main`。
+- 通过 `/api/runs/2/review` 批准后，系统使用固定 head 的合并路径完成合并；GitHub 返回 PR 为 `MERGED`，目标分支 merge commit 为 `506690980900df4723c45c76d688cdcf134dea16`。
+- 最终 Run 为 `SUCCEEDED`、`delivery_status=merged`，Runner worktree 已移除。
+
+同一环境中的首次尝试因 Planner 增加了不适用的环境与顺序条件，在两轮自动修复后仍为 `ready_to_merge=false`；系统没有创建 PR，随后经系统拒绝接口完成清理。这同时验证了失败检查不会误发布的主路径。
+
+本次仓库没有配置一个会主动阻止该 PR 的 branch protection / required checks 场景，因此“保护规则确实阻挡合并”的外部行为仍未现场验证；代码只保证把 `gh` 的失败向上报告，不能代替针对具体仓库规则的验收。批准路径会移除 Runner worktree，但不会自动删除 GitHub 远端任务分支；PR #17 的远端分支是在验收完成后手工精确删除的。
