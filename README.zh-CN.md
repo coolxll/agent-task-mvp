@@ -89,3 +89,4 @@ MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash \
 - 网页验收和本机合并不需要 GitHub；它只会快进提交任务时选中的本机分支，不会覆盖后来产生的提交或未提交改动。PR 自动创建/合并仅支持 `github.com` 仓库，是可选交付方式。
 - 本机仓库必须没有已跟踪或未跟踪的改动。Git bundle 输入上限 48 MiB。大型仓库可使用手工配置的远端已有目录；此时选择的是 Runner 上的代码，不会自动包含 Mac 的未提交内容。
 - 等待用户输入时的状态和会话可持久保存；Runner Worker 在执行中异常退出后的自动侦测与恢复、自动修复循环、多 Manager、多节点步骤调度尚未实现。
+- Paseo Driver 尚未完成结构化输出和会话生命周期的真实闭环验收，因此默认不会出现在可用 Agent 列表。仅在隔离测试 Runner 上设置 `ENABLE_EXPERIMENTAL_PASEO=1` 才会启用；Full access 使用 Paseo 的 `full-access` 模式，只读阶段使用 `auto-review`。

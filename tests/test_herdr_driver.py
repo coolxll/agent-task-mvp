@@ -114,8 +114,19 @@ class HerdrAndPaseoDriverTests(unittest.TestCase):
                 self.assertIn("--cwd", called_cmd)
                 self.assertIn(str(work_dir), called_cmd)
                 self.assertIn("--mode", called_cmd)
-                self.assertIn("bypass", called_cmd)
+                self.assertIn("full-access", called_cmd)
                 self.assertIn("Hello Paseo", called_cmd)
+                handle.wait()
+
+    def test_paseo_readonly_uses_review_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            result_path = work_dir / "result.json"
+            with patch("subprocess.Popen") as mock_popen, (work_dir / "run.log").open("w") as log:
+                mock_popen.return_value = MagicMock(pid=7777)
+                handle = PaseoDriver.start("Review", work_dir, result_path, log, "full", readonly=True)
+                command = mock_popen.call_args[0][0]
+                self.assertEqual(command[command.index("--mode") + 1], "auto-review")
                 handle.wait()
 
 

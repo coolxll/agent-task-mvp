@@ -43,6 +43,16 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse(status["available"])
         self.assertIn("not configured", status["reason"])
 
+    def test_paseo_requires_explicit_experimental_opt_in(self):
+        with patch.dict(os.environ, {}, clear=True), patch("agent_drivers._command_status", return_value=(True, None)):
+            status = next(row for row in agent_drivers.agent_statuses() if row["kind"] == "paseo")
+        self.assertFalse(status["available"])
+        self.assertIn("ENABLE_EXPERIMENTAL_PASEO", status["reason"])
+        with patch.dict(os.environ, {"ENABLE_EXPERIMENTAL_PASEO": "1"}), \
+                patch("agent_drivers._command_status", return_value=(True, None)):
+            status = next(row for row in agent_drivers.agent_statuses() if row["kind"] == "paseo")
+        self.assertTrue(status["available"])
+
     def test_get_driver(self):
         self.assertIs(agent_drivers.get_driver("acp"), agent_drivers.AcpDriver)
         self.assertIs(agent_drivers.get_driver("antigravity"), agent_drivers.AntigravityDriver)
