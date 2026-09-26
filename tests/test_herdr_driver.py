@@ -116,6 +116,7 @@ class HerdrAndPaseoDriverTests(unittest.TestCase):
                 self.assertIn("--mode", called_cmd)
                 self.assertIn("bypass", called_cmd)
                 self.assertIn("Hello Paseo", called_cmd)
+                handle.wait()
 
 
 if __name__ == "__main__":
