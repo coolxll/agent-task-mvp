@@ -523,8 +523,12 @@ class PaseoDriver:
     @classmethod
     def start(cls, prompt, workspace, result_path, log, access, session_id=None, readonly=False, schema=None):
         cmd = [cls.get_binary_path(), "run", "--cwd", str(workspace)]
-        if access == "full":
-            cmd.extend(["--mode", "bypass"])
+        if readonly:
+            cmd.extend(["--mode", "auto-review"])
+        elif access == "full":
+            cmd.extend(["--mode", "full-access"])
+        else:
+            cmd.extend(["--mode", "auto"])
         if schema:
             schema_json = schema.model_json_schema() if hasattr(schema, "model_json_schema") else schema
             cmd.extend(["--output-schema", json.dumps(schema_json)])
@@ -614,6 +618,8 @@ def agent_statuses():
     result = []
     for kind in available_kinds():
         ready, reason = _command_status(commands[kind])
+        if kind == "paseo" and os.environ.get("ENABLE_EXPERIMENTAL_PASEO") != "1":
+            ready, reason = False, "experimental provider; set ENABLE_EXPERIMENTAL_PASEO=1"
         result.append({"kind": kind, "available": ready, "reason": reason})
     return result
 
