@@ -8,6 +8,7 @@
 - 当前完整回归为 **55 项测试通过**，并通过 Python 编译检查、`node --check ui.js` 与 `git diff --check`。
 - 隔离 Manager/Runner 使用真实 Codex 在 `coolxll/agent-task-mvp` 完成 [PR #17](https://github.com/coolxll/agent-task-mvp/pull/17) 的创建与系统内批准合并：审核 head `a4a5de1150ca05f6d2b8afb5a4c2114173341fcd`，目标 `main`，merge commit `506690980900df4723c45c76d688cdcf134dea16`；Run #2 最终为 `SUCCEEDED`、`delivery_status=merged`，worktree 已清理。branch protection 主动阻挡场景仍未实测，远端任务分支由验收后手工删除。详见 [GitHub 交付安全边界](github-delivery-security.zh-CN.md)。
 - 合并失败处理与远端分支清理已实现并完成现场验收：在受保护测试仓库 `coolxll/agent-task-mvp-protect` 上验证了合并被拒（`error_kind=merge_protection`、保持 ready 可重试、PR 保持 OPEN）、重试幂等、放行后合并且远端任务分支被自动删除、以及 `delete_branch_on_merge` 场景下"引用不存在"按成功处理。当前完整回归为 **55 项测试通过**。详见 [GitHub 交付安全边界](github-delivery-security.zh-CN.md)。
+- 本地交付的网页快进合并已在真实项目目录（同仓库本机克隆，delivery=local）完成现场验收：正常快进、批准前变脏拒绝（改动保留）、批准前分支移动拒绝三个场景全部通过，详见[本机网页合并验收](local-web-merge-acceptance.zh-CN.md)。
 - Antigravity CLI `1.2.10` 的真实结构化 plan 探针在消耗 token 前被服务端拒绝，原因为当前账号不具备 Antigravity 资格。该结果是外部账号 entitlement 阻塞，不是本项目代码失败，也说明 CLI readiness 不能代表端到端可用。
 
 以下内容保留 2026-09-25 当时的验收过程和 Run 证据；其中“尚未实现”类表述应结合本节当前补充阅读。
