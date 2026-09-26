@@ -14,6 +14,16 @@ Manager 只会将提交任务时选中的本机分支快进到**已审核的准�
 - 首次真实试跑 Run #12 在 Agent 评审运行 unittest 后，因测试仓库未忽略 `__pycache__` 而触发只读阶段文件指纹保护，明确失败并清理。给一次性仓库补充 `.gitignore` 后，Run #13 通过。该保护要求项目正确忽略测试生成文件。
 - 本次真实任务的最终批准通过与网页按钮相同的 Manager API 完成；浏览器自动化入口不可用，未再次做按钮点击的视觉验收。没有对用户的实际项目目录执行合并。
 
+## 真实项目目录现场验收（2026-09-26）
+
+在真实本地 Git 项目 `~/workspace/personal/agent-task-mvp-protect`（Project #1，delivery=local）上完成三个场景的现场验收，全部经 Manager API 驱动真实 Codex 流水线（corp172-dev）：
+
+- **正常快进**：Run #6（base `f4a3937`，审核提交 `0187859`）批准后，本机 `main` HEAD 精确快进到 `0187859`，docstring 实际写入文件，工作树干净，Run `SUCCEEDED`/`merged`；origin/main 保持 `f4a3937` 未被触碰（系统不推送）。
+- **批准前变脏**：Run #7 到 `REVIEW` 后在本机目录制造未提交改动，批准被拒（HTTP 400 "The local project has uncommitted changes; approval did not modify it"），改动内容原样保留、本机 HEAD 未动、Run 保持 `REVIEW`；清理后重试批准成功，HEAD 快进到审核提交 `551cb93`。
+- **批准前分支移动**：Run #8 到 `REVIEW` 后本机新增提交使分支前移，批准被拒（HTTP 400 "The local branch moved since task submission; review and integrate manually"）；恢复到 base 后重试批准成功，HEAD 快进到审核提交 `74cca94`。
+
+现场执行备注：验收前曾在 Runner 上归档旧 worktrees 目录，托管克隆中的 stale worktree 注册导致新 Run 的 `git worktree add` 以 128 失败（Run #5，`PROVISIONING`）；在托管克隆执行 `git worktree prune` 清理后恢复正常。这是运维操作遗留，不是交付路径缺陷。
+
 ## 运行环境
 
 Mac Manager 和远端 Runner 都使用 `uv venv --python 3.12 .venv` 创建的项目虚拟环境，并从 `requirements.txt` 安装依赖。不要用系统 Python 直接启动 Manager。当前启动命令见[中文 README](../README.zh-CN.md)。
