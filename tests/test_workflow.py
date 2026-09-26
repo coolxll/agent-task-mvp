@@ -431,5 +431,124 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(gh.call_count,1)
         con.close()
 
+    def review_run_fixture(self, branch=None):
+        art={'pipeline_version':1,'ready_to_merge':True,'commit_sha':'a'*40}
+        if branch: art['branch']=branch
+        pkg={'source':{'repo_url':'https://github.com/owner/repo','base_branch':'main'},'delivery':'github'}
+        con=sqlite3.connect(':memory:');con.row_factory=sqlite3.Row
+        con.executescript(app.SCHEMA);control.migrate(con)
+        con.execute("INSERT INTO runs(id,task_id,node_id,agent_kind,status,created_at,updated_at,artifacts,package,delivery_status,pr_number) VALUES(1,1,1,'codex','REVIEW','','',?,?,'ready',42)",(json.dumps(art),json.dumps(pkg)))
+        manager=object.__new__(app.Manager)
+        return con,manager,manager.row(con,'runs',1)
+
+    def fake_gh_merge(self, calls, *, merge_error=None, view_state='MERGED', delete_error=None):
+        def fake_gh(args,cwd=None):
+            nonlocal delete_error
+            calls.append(args)
+            if args[:3]==['api','-X','DELETE']:
+                if delete_error:
+                    error, delete_error = delete_error, None
+                    raise error
+                return ''
+            if args[:2]==['pr','merge']:
+                if merge_error: raise merge_error
+                return ''
+            if 'headRefOid,baseRefName' in args[-1]:
+                return json.dumps({'state':'OPEN','headRefOid':'a'*40,'baseRefName':'main'})
+            return json.dumps({'state': view_state})
+        return fake_gh
+
+    def test_07b_merge_protection_failure_records_kind_and_keeps_ready(self):
+        con,manager,run=self.review_run_fixture()
+        calls=[]
+        fake=self.fake_gh_merge(calls,
+            merge_error=ValueError('gh: Base branch policy violation: required status check "guard" is expected'),
+            view_state='OPEN')
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            with self.assertRaisesRegex(ValueError,'Base branch policy'):
+                control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'ready')
+        self.assertEqual(row['delivery_error_kind'],'merge_protection')
+        self.assertFalse(any(x[:3]==['api','-X','DELETE'] for x in calls))
+        con.close()
+
+    def test_07c_merge_failure_generic_kind_for_unknown_errors(self):
+        con,manager,run=self.review_run_fixture()
+        calls=[]
+        fake=self.fake_gh_merge(calls, merge_error=ValueError('gh: connection reset by peer'), view_state='OPEN')
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            with self.assertRaisesRegex(ValueError,'connection reset'):
+                control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'ready')
+        self.assertEqual(row['delivery_error_kind'],'merge_failed')
+        con.close()
+
+    def test_07d_merge_exit_zero_but_not_merged_records_error(self):
+        con,manager,run=self.review_run_fixture()
+        calls=[]
+        fake=self.fake_gh_merge(calls, view_state='OPEN')
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            with self.assertRaisesRegex(ValueError,'branch protection'):
+                control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'ready')
+        self.assertEqual(row['delivery_error_kind'],'merge_protection')
+        con.close()
+
+    def test_07e_merge_failure_recheck_confirms_merged(self):
+        con,manager,run=self.review_run_fixture()
+        calls=[]
+        fake=self.fake_gh_merge(calls, merge_error=ValueError('gh: timeout'), view_state='MERGED')
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'merged')
+        self.assertIsNone(row['delivery_error_kind'])
+        con.close()
+
+    def test_09_merged_run_deletes_system_remote_branch(self):
+        con,manager,run=self.review_run_fixture(branch='agent/task-1-run-1-fix')
+        calls=[]
+        fake=self.fake_gh_merge(calls)
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'merged')
+        self.assertIsNone(row['delivery_error_kind'])
+        self.assertIn(['api','-X','DELETE','repos/owner/repo/git/refs/heads/agent/task-1-run-1-fix'],calls)
+        con.close()
+
+    def test_09a_branch_delete_failure_keeps_merged_and_retry_succeeds(self):
+        con,manager,run=self.review_run_fixture(branch='agent/task-1-run-1-fix')
+        calls=[]
+        fake=self.fake_gh_merge(calls, delete_error=ValueError('gh: HTTP 500: internal error'))
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            with self.assertRaisesRegex(ValueError,'retry approval'):
+                control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'merged')
+        self.assertEqual(row['delivery_error_kind'],'branch_delete_failed')
+        calls.clear()
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'merged')
+        self.assertIsNone(row['delivery_error_kind'])
+        self.assertIsNone(row['delivery_error'])
+        con.close()
+
+    def test_09b_non_system_branch_is_never_deleted(self):
+        con,manager,run=self.review_run_fixture(branch='main')
+        calls=[]
+        fake=self.fake_gh_merge(calls)
+        with patch('control.gh',side_effect=fake),patch('app.runner_call',return_value={'commit_sha':'a'*40}):
+            control.review_delivery(manager,con,run,{}, {'decision':'approve'})
+        row=manager.row(con,'runs',1)
+        self.assertEqual(row['delivery_status'],'merged')
+        self.assertFalse(any(x[:3]==['api','-X','DELETE'] for x in calls))
+        con.close()
+
 
 if __name__=='__main__': unittest.main()

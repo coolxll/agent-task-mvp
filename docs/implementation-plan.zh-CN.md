@@ -8,7 +8,7 @@
 | 2 | Run 参数没有完整可追溯输入 | 版本化 JSON 任务包、精确 Git 提交、Git bundle 传输与摘要校验 | 已实现；Run #10 和集成测试通过 |
 | 3 | 单次 Codex 直接写代码 | Planner Agent 输出有依赖的步骤，依序实现，独立 Agent 评审和验收，普通代码执行 Gate | 已实现；corp172-dev Run #10 通过 |
 | 4 | 只有最终日志与 diff | 展示任务包、当前阶段、计划、评审、测试与验收报告 | 已实现；Chrome 查看 Run #10 结果 |
-| 5 | 成果停留在远端 | 成果 bundle 自动回 Mac；GitHub PR 创建；Web 验收后合并；拒绝关闭 PR | Git bundle 实测；真实 GitHub PR #17 已通过系统创建、校验、批准合并和清理，branch protection 阻挡路径待验收 |
+| 5 | 成果停留在远端 | 成果 bundle 自动回 Mac；GitHub PR 创建；Web 验收后合并；拒绝关闭 PR | Git bundle 实测；真实 GitHub PR #17 已通过系统创建、校验、批准合并和清理。合并被保护规则拒绝时记录结构化错误并可重试，合并确认后自动删除 `agent/task-` 远端任务分支；两条路径已于 2026-09-26 在 `coolxll/agent-task-mvp-protect` 现场验收通过 |
 | 6 | 文档与产品目标不一致 | 更新中英使用说明、配置要求、限制与验证记录 | 已更新中英文 README 和逐项验收记录 |
 
 ## 本轮取舍

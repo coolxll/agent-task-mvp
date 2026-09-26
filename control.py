@@ -15,6 +15,7 @@ def migrate(con):
         'projects': {'local_path': "TEXT NOT NULL DEFAULT ''", 'delivery': "TEXT NOT NULL DEFAULT 'branch'"},
         'runs': {'package': "TEXT NOT NULL DEFAULT '{}'", 'stage': 'TEXT',
                  'delivery_status': "TEXT NOT NULL DEFAULT 'pending'", 'delivery_error': 'TEXT',
+                 'delivery_error_kind': 'TEXT', 'error_kind': 'TEXT',
                  'pr_url': 'TEXT', 'pr_number': 'INTEGER', 'delivery_repo': 'TEXT'},
     }
     for table, columns in fields.items():
@@ -104,7 +105,7 @@ def route(manager, con, method, path):
             if method == 'POST' and parts[4] == 'publish':
                 if run['status'] != 'REVIEW':
                     raise ValueError('Run is not ready for delivery')
-                con.execute("UPDATE runs SET delivery_status='pending',delivery_error=NULL WHERE id=? AND delivery_status='failed'", (run['id'],))
+                con.execute("UPDATE runs SET delivery_status='pending',delivery_error=NULL,delivery_error_kind=NULL WHERE id=? AND delivery_status='failed'", (run['id'],))
                 manager.reply(200, {'ok': True})
                 return True
     return False
@@ -185,7 +186,8 @@ def start_run(manager, con, p):
             raise ValueError('Runner does not support agent kind: ' + agent_kind)
         runner_call(node, 'POST', '/runs', payload, timeout=180)
     except Exception as exc:
-        con.execute("UPDATE runs SET status='FAILED',error=?,package=?,updated_at=? WHERE id=?", (str(exc), json.dumps(package), now(), run_id))
+        con.execute("UPDATE runs SET status='FAILED',error=?,error_kind=?,package=?,updated_at=? WHERE id=?",
+                    (str(exc), getattr(exc, 'kind', None), json.dumps(package), now(), run_id))
         con.execute("UPDATE tasks SET status='FAILED',updated_at=? WHERE id=?", (now(), task['id']))
         return {'id': run_id, 'task_id': task['id'], 'status': 'FAILED', 'error': str(exc)}
     return {'id': run_id, 'task_id': task['id'], 'status': 'PENDING'}
@@ -286,8 +288,20 @@ def publish(con, db_path, run_id, node):
                 con.execute("UPDATE runs SET delivery_status='failed',delivery_error=? WHERE id=?", (str(exc), run_id))
 
 
+PROTECTION_MARKERS = ('required status check', 'branch protection', 'protected branch',
+                      'base branch policy', 'not mergeable', 'approving review',
+                      'review required', 'code owner', 'merge blocked')
+
+
+def merge_failure_kind(detail):
+    lowered = detail.lower()
+    if any(marker in lowered for marker in PROTECTION_MARKERS):
+        return 'merge_protection'
+    return 'merge_failed'
+
+
 def review_delivery(manager, con, run, node, payload):
-    from app import runner_call
+    from app import CodedError, runner_call
     if payload.get('decision') not in ('approve', 'reject') or run['status'] != 'REVIEW':
         raise ValueError('Run is not ready for review')
     with DELIVERY_LOCK:
@@ -313,26 +327,58 @@ def review_delivery(manager, con, run, node, payload):
             if state.get('commit_sha') != artifacts['commit_sha']:
                 raise ValueError('Runner result changed')
             merge_local_result(con, run, package, artifacts)
-            con.execute("UPDATE runs SET delivery_status='merged',delivery_error=NULL WHERE id=?", (run['id'],))
+            con.execute("UPDATE runs SET delivery_status='merged',delivery_error=NULL,delivery_error_kind=NULL WHERE id=?", (run['id'],))
             con.commit()
-        if package['delivery'] == 'github' and run['delivery_status'] != 'merged':
-            if not run['pr_number']:
-                raise ValueError('PR has not been created')
-            # Runner freezes its commit after review; verify it again before merge.
-            state = runner_call(node, 'GET', '/runs/%s' % run['id'])
-            if state.get('commit_sha') != artifacts['commit_sha']:
-                raise ValueError('Runner result changed')
-            pr = json.loads(gh(['pr', 'view', str(run['pr_number']), '--repo', owner_repo,
-                '--json', 'state,headRefOid,baseRefName']))
-            if pr['headRefOid'] != artifacts['commit_sha'] or pr['baseRefName'] != package['source']['base_branch']:
-                raise ValueError('PR head or base changed; review the new changes before merging')
-            if pr['state'] != 'MERGED':
-                if pr['state'] != 'OPEN':
-                    raise ValueError('PR is not open')
-                gh(['pr', 'merge', str(run['pr_number']), '--repo', owner_repo, '--squash',
-                    '--match-head-commit', artifacts['commit_sha']])
-                result = json.loads(gh(['pr', 'view', str(run['pr_number']), '--repo', owner_repo, '--json', 'state']))
-                if result['state'] != 'MERGED':
-                    raise ValueError('PR was not merged; required checks or branch protection may be pending')
-            con.execute("UPDATE runs SET delivery_status='merged',delivery_error=NULL WHERE id=?", (run['id'],))
-            con.commit()
+        if package['delivery'] == 'github':
+            if run['delivery_status'] != 'merged':
+                if not run['pr_number']:
+                    raise ValueError('PR has not been created')
+                # Runner freezes its commit after review; verify it again before merge.
+                state = runner_call(node, 'GET', '/runs/%s' % run['id'])
+                if state.get('commit_sha') != artifacts['commit_sha']:
+                    raise ValueError('Runner result changed')
+                pr = json.loads(gh(['pr', 'view', str(run['pr_number']), '--repo', owner_repo,
+                    '--json', 'state,headRefOid,baseRefName']))
+                if pr['headRefOid'] != artifacts['commit_sha'] or pr['baseRefName'] != package['source']['base_branch']:
+                    raise ValueError('PR head or base changed; review the new changes before merging')
+                if pr['state'] != 'MERGED':
+                    if pr['state'] != 'OPEN':
+                        raise ValueError('PR is not open')
+                    failure = None
+                    try:
+                        gh(['pr', 'merge', str(run['pr_number']), '--repo', owner_repo, '--squash',
+                            '--match-head-commit', artifacts['commit_sha']])
+                        result = json.loads(gh(['pr', 'view', str(run['pr_number']), '--repo', owner_repo, '--json', 'state']))
+                        if result['state'] != 'MERGED':
+                            failure = ValueError('PR was not merged; required checks or branch protection may be pending')
+                    except ValueError as exc:
+                        failure = exc
+                        # The merge command failed, but it may still have taken effect.
+                        try:
+                            if json.loads(gh(['pr', 'view', str(run['pr_number']), '--repo', owner_repo,
+                                    '--json', 'state']))['state'] == 'MERGED':
+                                failure = None
+                        except ValueError:
+                            pass
+                    if failure is not None:
+                        kind = merge_failure_kind(str(failure))
+                        con.execute("UPDATE runs SET delivery_error=?,delivery_error_kind=? WHERE id=?",
+                                    (str(failure), kind, run['id']))
+                        con.commit()
+                        raise CodedError(kind, str(failure))
+                con.execute("UPDATE runs SET delivery_status='merged',delivery_error=NULL,delivery_error_kind=NULL WHERE id=?", (run['id'],))
+                con.commit()
+            # The merge is confirmed; remove the system-created remote task branch.
+            branch = artifacts.get('branch') or ''
+            if branch.startswith('agent/task-'):
+                try:
+                    gh(['api', '-X', 'DELETE', 'repos/%s/git/refs/heads/%s' % (owner_repo, branch)])
+                except ValueError as exc:
+                    if 'Reference does not exist' not in str(exc):
+                        con.execute("UPDATE runs SET delivery_error=?,delivery_error_kind=? WHERE id=?",
+                                    (str(exc), 'branch_delete_failed', run['id']))
+                        con.commit()
+                        raise CodedError('branch_delete_failed',
+                                         'Result is merged, but deleting the remote task branch failed; retry approval to finish cleanup')
+                con.execute("UPDATE runs SET delivery_error=NULL,delivery_error_kind=NULL WHERE id=?", (run['id'],))
+                con.commit()
