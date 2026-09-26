@@ -25,6 +25,8 @@ Paseo remains experimental because its structured-result and session lifecycle h
 
 If code review, a Gate, or Agent acceptance fails, the Runner sends the concrete findings and outputs to a repair turn and repeats independent review, all Gates, and acceptance. It performs at most two repair attempts and preserves every verification round in the Run artifacts.
 
+The Runner watchdog also detects an unexpectedly exited worker. A Run with a prepared worktree and persisted pipeline artifacts resumes completed-stage-aware execution, with at most two automatic worker recoveries. A worker lost during ambiguous provisioning is marked failed instead of risking duplicate workspace creation.
+
 On the Mac, keep an SSH port forward running and start Manager:
 
 ```sh

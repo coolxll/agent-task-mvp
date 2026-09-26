@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -69,6 +70,106 @@ def slug(value):
     return re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:40] or "task"
 
 
+MAX_WORKER_RECOVERIES = 2
+
+
+def process_alive(pid):
+    if not pid:
+        return False
+    pid = int(pid)
+    try:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            return False
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def spawn_worker(root, run_id):
+    proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute",
+        "--root", str(root), "--run-id", str(run_id)], start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    update_state(root / "runs" / str(run_id) / "state.json",
+                 {"worker_pid": proc.pid, "worker_started_at": now(), "worker_start_deadline": None})
+    return proc
+
+
+def recover_stale_runs(root):
+    """Restart resumable Runs whose worker disappeared, with a bounded retry count."""
+    recovered = 0
+    runs = root / "runs"
+    if not runs.is_dir():
+        return recovered
+    for state_file in runs.glob("*/state.json"):
+        should_spawn = False
+        agent_pid = None
+        run_id = state_file.parent.name
+        with state_file.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = read_json(state_file)
+            if state.get("status") not in ("PENDING", "PROVISIONING", "RUNNING", "VERIFYING"):
+                continue
+            if process_alive(state.get("worker_pid")):
+                continue
+            if float(state.get("worker_start_deadline") or 0) > time.time():
+                continue
+            attempts = int(state.get("recovery_attempts") or 0)
+            workspace = Path(state.get("workspace") or "")
+            resumable = (state["status"] == "PENDING" or
+                (state["status"] in ("RUNNING", "VERIFYING") and state.get("base_sha")
+                 and workspace.is_dir() and (state_file.parent / "artifacts.json").is_file()))
+            if attempts >= MAX_WORKER_RECOVERIES or not resumable:
+                reason = ("worker recovery limit exceeded" if attempts >= MAX_WORKER_RECOVERIES
+                          else "worker stopped during non-resumable provisioning")
+                state.update(status="FAILED", error=reason, finished_at=now(), worker_pid=None, pid=None)
+                state["updated_at"] = now()
+                atomic_json(state_file, state)
+                continue
+            agent_pid = state.get("pid")
+            state.update(worker_pid=None, pid=None, error=None, recovery_attempts=attempts + 1,
+                         last_recovery_at=now())
+            state["updated_at"] = now()
+            atomic_json(state_file, state)
+            should_spawn = True
+        if agent_pid:
+            try:
+                agent_drivers.get_driver(state["agent_kind"]).cancel(agent_pid)
+            except (ProcessLookupError, ValueError):
+                pass
+            for _ in range(20):
+                if not process_alive(agent_pid):
+                    break
+                time.sleep(.1)
+            if process_alive(agent_pid):
+                try:
+                    os.killpg(int(agent_pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        if should_spawn:
+            with (state_file.parent / "run.log").open("a") as log:
+                log.write("[%s] Recovering worker after unexpected exit (attempt %s/%s)\n" %
+                          (now(), state["recovery_attempts"], MAX_WORKER_RECOVERIES))
+            spawn_worker(root, run_id)
+            recovered += 1
+    return recovered
+
+
+def worker_recovery_loop(root):
+    while True:
+        try:
+            recover_stale_runs(root)
+        except Exception as exc:
+            sys.stderr.write("worker recovery error: %s\n" % exc)
+        time.sleep(2)
+
+
 async def get_payload(request: Request) -> dict:
     body = await request.body()
     if not body.strip():
@@ -120,6 +221,7 @@ class Runner:
 def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -> FastAPI:
     app = FastAPI(title="Agent Task Runner", docs_url="/docs", redoc_url=None)
     runner = Runner(root, token, agent_access)
+    threading.Thread(target=worker_recovery_loop, args=(root,), daemon=True).start()
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError):
@@ -201,14 +303,13 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
                  "error": None, "created_at": now(), "updated_at": now()}
         if not isinstance(state["gates"], list) or not all(isinstance(x, str) for x in state["gates"]):
             raise ValueError("gates must be a list of commands")
-        state.update(stage="PENDING", package=p.get("package", {}), worker_pid=None)
+        state.update(stage="PENDING", package=p.get("package", {}), worker_pid=None,
+                     worker_start_deadline=time.time() + 10, recovery_attempts=0)
         if p.get("source_bundle"):
             git_io.decode_bundle(p["source_bundle"], run_dir / "input.bundle")
         atomic_json(run_dir / "package.json", p.get("package", {}))
         atomic_json(run_dir / "state.json", state)
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(root),
-                          "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spawn_worker(root, run_id)
         return state
 
     @app.get("/runs/{run_id}")
@@ -261,10 +362,9 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
         if not answer or len(answer) > 20000:
             raise ValueError("answer must contain 1–20000 characters")
         state = update_state(runner.state_path(run_id), {"status": "RUNNING", "answer": answer,
-            "question": None, "error": None}, allowed_from=("NEEDS_INPUT",))
-        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "execute", "--root", str(root),
-                          "--run-id", run_id], start_new_session=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            "question": None, "error": None, "worker_start_deadline": time.time() + 10},
+            allowed_from=("NEEDS_INPUT",))
+        spawn_worker(root, run_id)
         return state
 
     @app.post("/runs/{run_id}/cancel")
