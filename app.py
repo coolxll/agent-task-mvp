@@ -159,7 +159,9 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
 
     @app.get("/health")
     def health():
-        return {"ok": True, "api_version": 2, "agent_kinds": agent_drivers.available_kinds()}
+        agents = agent_drivers.agent_statuses()
+        return {"ok": True, "api_version": 2, "agent_kinds": agent_drivers.ready_kinds(agents),
+                "default_agent_kind": agent_drivers.effective_default(agents), "agents": agents}
 
     @app.post("/runs", status_code=201)
     async def create_run(request: Request):
@@ -181,6 +183,9 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
             raise ValueError("title and description are required")
         agent_kind = p.get("agent_kind", agent_drivers.default_kind())
         agent_drivers.get_driver(agent_kind)
+        status = next(row for row in agent_drivers.agent_statuses() if row["kind"] == agent_kind)
+        if not status["available"]:
+            raise ValueError("agent kind is unavailable: %s (%s)" % (agent_kind, status["reason"]))
         run_dir = root / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
         branch = "agent/task-%s-run-%s-%s" % (p["task_id"], run_id, slug(p["title"]))
@@ -700,7 +705,20 @@ def create_manager_app(db_path: Path) -> FastAPI:
     # API: Agents
     @app.get("/api/agents")
     def list_agents():
-        return agent_drivers.available_kinds()
+        return agent_drivers.ordered_kinds()
+
+    @app.get("/api/nodes/{node_id}/agents")
+    def list_node_agents(node_id: int):
+        with closing(manager.db()) as con:
+            node = manager.row(con, "nodes", node_id)
+        health = runner_call(node, "GET", "/health")
+        if health.get("api_version") != 2:
+            raise ValueError("Runner is outdated; deploy the current Runner files")
+        agents = health.get("agents")
+        if not isinstance(agents, list):
+            agents = [{"kind": kind, "available": True, "reason": None}
+                      for kind in health.get("agent_kinds", [])]
+        return {"default_kind": health.get("default_agent_kind"), "agents": agents}
 
     # API: Submit
     @app.post("/api/submit", status_code=201)

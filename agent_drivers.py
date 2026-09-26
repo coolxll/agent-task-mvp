@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import threading
@@ -136,13 +137,10 @@ class ClaudeDriver:
 
     @staticmethod
     def start(prompt, workspace, result_path, log, access, session_id=None, readonly=False, schema=None):
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
         claude_bin = shutil.which("claude")
-        if not api_key and not claude_bin:
-            raise ValueError(
-                "Claude provider requires ANTHROPIC_API_KEY environment variable or 'claude' CLI installed."
-            )
-        cmd = [claude_bin or "claude", "-p", prompt]
+        if not claude_bin:
+            raise ValueError("Claude provider requires the 'claude' CLI on PATH.")
+        cmd = [claude_bin, "-p", prompt]
         if session_id:
             cmd.extend(["--resume", session_id])
         out_file = Path(result_path).open("w")
@@ -585,3 +583,54 @@ def available_kinds():
 
 def default_kind():
     return DEFAULT_KIND
+
+
+def _command_status(command):
+    if not command:
+        return False, "command is not configured"
+    path = Path(command).expanduser()
+    if path.parent != Path('.'):
+        ready = path.is_file() and os.access(path, os.X_OK)
+    else:
+        ready = shutil.which(command) is not None
+    return (True, None) if ready else (False, "command not found: " + command)
+
+
+def agent_statuses():
+    """Report registered providers separately from providers runnable on this host."""
+    try:
+        acp_command = shlex.split(os.environ.get("ACP_AGENT_COMMAND", "codex-acp"))
+    except ValueError:
+        acp_command = []
+    commands = {
+        "acp": acp_command[0] if acp_command else "",
+        "antigravity": AntigravityDriver.get_binary_path(),
+        "claude": shutil.which("claude") or "claude",
+        "codex": shutil.which("codex") or "codex",
+        "herdr": os.environ.get("HERDR_BIN") or shutil.which("herdr") or "herdr",
+        "paseo": PaseoDriver.get_binary_path(),
+        "pi": PiDriver.get_binary_path(),
+    }
+    result = []
+    for kind in available_kinds():
+        ready, reason = _command_status(commands[kind])
+        result.append({"kind": kind, "available": ready, "reason": reason})
+    return result
+
+
+def ready_kinds(statuses=None):
+    rows = agent_statuses() if statuses is None else statuses
+    return [row["kind"] for row in rows if row["available"]]
+
+
+def effective_default(statuses=None):
+    ready = ready_kinds(statuses)
+    for kind in (DEFAULT_KIND, "codex", *available_kinds()):
+        if kind in ready:
+            return kind
+    return None
+
+
+def ordered_kinds():
+    kinds = available_kinds()
+    return ([DEFAULT_KIND] if DEFAULT_KIND in kinds else []) + [kind for kind in kinds if kind != DEFAULT_KIND]

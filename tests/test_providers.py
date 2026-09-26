@@ -19,6 +19,30 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("codex", kinds)
         self.assertIn("pi", kinds)
 
+    def test_provider_status_and_effective_default(self):
+        statuses = [
+            {"kind": "antigravity", "available": False, "reason": "missing"},
+            {"kind": "codex", "available": True, "reason": None},
+            {"kind": "pi", "available": True, "reason": None},
+        ]
+        self.assertEqual(agent_drivers.ready_kinds(statuses), ["codex", "pi"])
+        self.assertEqual(agent_drivers.effective_default(statuses), "codex")
+        self.assertEqual(agent_drivers.ordered_kinds()[0], agent_drivers.default_kind())
+
+    def test_command_status_requires_an_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = Path(tmp) / "agent"
+            command.write_text("#!/bin/sh\n")
+            self.assertFalse(agent_drivers._command_status(str(command))[0])
+            command.chmod(0o755)
+            self.assertEqual(agent_drivers._command_status(str(command)), (True, None))
+
+    def test_invalid_acp_command_is_reported_unavailable(self):
+        with patch.dict(os.environ, {"ACP_AGENT_COMMAND": "'unterminated"}):
+            status = next(row for row in agent_drivers.agent_statuses() if row["kind"] == "acp")
+        self.assertFalse(status["available"])
+        self.assertIn("not configured", status["reason"])
+
     def test_get_driver(self):
         self.assertIs(agent_drivers.get_driver("acp"), agent_drivers.AcpDriver)
         self.assertIs(agent_drivers.get_driver("antigravity"), agent_drivers.AntigravityDriver)
@@ -82,12 +106,12 @@ class ProviderTests(unittest.TestCase):
                 self.assertIn("--json-schema", call_args)
                 handle.wait()
 
-    def test_claude_driver_without_key_raises(self):
+    def test_claude_driver_without_cli_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             result_path = workspace / "out.json"
             with patch.dict(os.environ, {}, clear=True), patch("shutil.which", return_value=None):
-                with self.assertRaisesRegex(ValueError, "ANTHROPIC_API_KEY"):
+                with self.assertRaisesRegex(ValueError, "claude.*CLI"):
                     agent_drivers.ClaudeDriver.start(
                         prompt="hello",
                         workspace=workspace,

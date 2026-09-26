@@ -19,7 +19,7 @@ uv pip install --python /workspace/agent-task-mvp/.venv/bin/python -r /workspace
   --agent-access full
 ```
 
-The access setting is specific to the current `corp172-dev` container, which cannot run Codex's normal `workspace-write` sandbox. Use trusted code there. `AgentDriver` is the workflow boundary. For ACP, install `@agentclientprotocol/codex-acp@1.13.1` and set `ACP_AGENT_COMMAND` to its executable in the Runner environment; the task can then select `acp`.
+The access setting is specific to the current `corp172-dev` container, which cannot run Codex's normal `workspace-write` sandbox. Use trusted code there. `AgentDriver` is the workflow boundary. The Runner reports which registered providers have a usable command on that machine, and the task form only offers those providers. It prefers `DEFAULT_AGENT_KIND`, then falls back to an available Codex or another provider. For ACP, install `@agentclientprotocol/codex-acp@1.13.1` and set `ACP_AGENT_COMMAND` to its executable in the Runner environment; the task can then select `acp`.
 
 On the Mac, keep an SSH port forward running and start Manager:
 

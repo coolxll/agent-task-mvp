@@ -19,6 +19,7 @@ const labels = {
     nodeHelp: 'Start the Runner and SSH port forward before adding the Node.',
     taskHelp: 'Select a Project, Node, and Workspace. Creating the Task starts a Run immediately.',
     needSetup: 'Add a Project and Node in Setup first.',
+    noAgents: 'No runnable Agent is available on this Node.',
     logs: 'Logs', cancel: 'Cancel', cleanup: 'Cleanup', result: 'View result',
     summary: 'Agent summary', files: 'Changed files', gatesResult: 'Gate results',
     diff: 'Diff', approve: 'Accept delivery and keep branch', reject: 'Reject delivery and delete branch',
@@ -44,6 +45,7 @@ const labels = {
     nodeHelp: '添加节点前，请先启动远端 Runner 和 Mac 上的 SSH 端口转发。',
     taskHelp: '选择项目、节点和工作区；点击创建后立即启动一次 Run。',
     needSetup: '请先在配置页添加项目和节点。',
+    noAgents: '此节点没有可运行的 Agent。',
     logs: '查看日志', cancel: '取消', cleanup: '清理工作区', result: '查看结果',
     summary: 'Agent 总结', files: '变更文件', gatesResult: '验证结果',
     diff: '代码差异', approve: '验收通过并保留分支', reject: '拒绝交付并删除分支',
@@ -128,6 +130,33 @@ function options(rows, label) {
 }
 
 function formData(form) { return Object.fromEntries(new FormData(form)); }
+
+function bindAgentAvailability(nodeSelect, agentSelect, submitButton) {
+  let requestId = 0;
+  const baseDisabled = Boolean(submitButton?.disabled);
+  async function refresh(preferred) {
+    const currentRequest = ++requestId;
+    agentSelect.disabled = true;
+    if (submitButton) submitButton.disabled = true;
+    try {
+      const data = await api('/nodes/' + Number(nodeSelect.value) + '/agents');
+      if (currentRequest !== requestId) return;
+      const available = data.agents.filter(row => row.available);
+      agentSelect.innerHTML = available.length
+        ? available.map(row => `<option value="${esc(row.kind)}">${esc(row.kind)}</option>`).join('')
+        : `<option value="">${esc(t('noAgents'))}</option>`;
+      const selected = available.some(row => row.kind === preferred) ? preferred : data.default_kind;
+      if (selected && available.some(row => row.kind === selected)) agentSelect.value = selected;
+      agentSelect.disabled = !available.length;
+      if (submitButton) submitButton.disabled = baseDisabled || !available.length;
+    } catch (error) {
+      if (currentRequest !== requestId) return;
+      agentSelect.innerHTML = `<option value="">${esc(errorName(error.message))}</option>`;
+    }
+  }
+  nodeSelect.addEventListener('change', () => refresh());
+  refresh(agentSelect.value);
+}
 
 async function show(view = current) {
   current = view;
@@ -271,7 +300,7 @@ function renderBoard(app, {projects, nodes, workspaces, tasks, runs, agents}) {
         <label>${t('directory')}<select name="project_id" id="modal-task-project" required>${options(projects, x => x.local_path || x.name + ' · ' + (x.repo_url || x.source_path))}</select></label>
         <button type="button" id="modal-browse-folder">${t('browse')}</button><span id="modal-folder-note" class="muted" style="margin-left:8px"></span>
         <label>${t('node')}<select name="node_id" id="modal-task-node" required>${options(nodes, x => x.name)}</select></label>
-        <label>${t('agent')}<select name="agent_kind" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
+        <label>${t('agent')}<select name="agent_kind" id="modal-task-agent" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
         <label>${t('planner')}<select name="planner"><option value="remote">${t('remotePlanner')}</option><option value="manager">${t('managerPlanner')}</option></select></label>
         <label>${t('requirement')}<textarea name="requirement" rows="8" required placeholder="${zh ? '例如：为导出功能增加 CSV 格式，保留现有 JSON 行为，并补充测试。' : 'For example: add CSV export, preserve JSON behavior, and add tests.'}"></textarea></label>
         <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
@@ -284,6 +313,8 @@ function renderBoard(app, {projects, nodes, workspaces, tasks, runs, agents}) {
 
   const taskDialog = document.getElementById('new-task-dialog');
   const detailModal = document.getElementById('detail-modal');
+  bindAgentAvailability(document.getElementById('modal-task-node'),
+    document.getElementById('modal-task-agent'), document.querySelector('#task-modal-form button[type=submit]'));
 
   document.getElementById('open-new-task').onclick = () => taskDialog.showModal();
   document.getElementById('close-new-task-dialog').onclick = () => taskDialog.close();
@@ -310,6 +341,7 @@ function renderBoard(app, {projects, nodes, workspaces, tasks, runs, agents}) {
     td.showModal();
     document.getElementById('modal-task-project').value = project.id;
     document.getElementById('modal-task-node').value = node;
+    document.getElementById('modal-task-node').dispatchEvent(new Event('change'));
     document.querySelector('#task-modal-form [name=requirement]').value = requirement;
     document.getElementById('modal-folder-note').textContent = project.dirty ? t('dirty') : project.local_path;
   });
@@ -472,7 +504,7 @@ function renderTasks(app, {projects, nodes, tasks, runs, agents}) {
         <label>${t('directory')}<select name="project_id" id="task-project" required>${options(projects, x => x.local_path || x.name + ' · ' + (x.repo_url || x.source_path))}</select></label>
         <button type="button" id="browse-folder">${t('browse')}</button><p id="folder-note" class="muted"></p>
         <label>${t('node')}<select name="node_id" id="task-node" required>${options(nodes, x => x.name)}</select></label>
-        <label>${t('agent')}<select name="agent_kind" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
+        <label>${t('agent')}<select name="agent_kind" id="task-agent" required>${agents.map(kind => `<option value="${esc(kind)}">${esc(kind)}</option>`).join('')}</select></label>
         <label>${t('planner')}<select name="planner"><option value="remote">${t('remotePlanner')}</option><option value="manager">${t('managerPlanner')}</option></select></label>
         <label>${t('requirement')}<textarea name="requirement" rows="10" required placeholder="${zh ? '例如：为导出功能增加 CSV 格式，保留现有 JSON 行为，并补充测试。' : 'For example: add CSV export, preserve JSON behavior, and add tests.'}"></textarea></label>
         <button ${(!projects.length || !nodes.length) ? 'disabled' : ''}>${t('createRun')}</button>
@@ -480,12 +512,15 @@ function renderTasks(app, {projects, nodes, tasks, runs, agents}) {
     <section><h2>${t('tasks')}</h2><table><tbody>${tasks.map(task => `
       <tr><td>#${task.id} ${esc(task.title)}</td><td>${esc(projectMap[task.project_id]?.name)}</td>
       <td>${esc(stateName(task.status))}</td><td>${['TODO','FAILED','REJECTED','CANCELLED'].includes(task.status) ? `<button data-rerun="${task.id}">${t('rerun')}</button>` : ''}</td></tr>`).join('')}</tbody></table></section>`;
+  bindAgentAvailability(document.getElementById('task-node'), document.getElementById('task-agent'),
+    document.querySelector('#task-form button:not([type=button])'));
   document.getElementById('browse-folder').onclick = () => browseFolder(async project => {
     const requirement = document.querySelector('[name=requirement]').value;
     const node = document.getElementById('task-node').value;
     await show('tasks');
     document.getElementById('task-project').value = project.id;
     document.getElementById('task-node').value = node;
+    document.getElementById('task-node').dispatchEvent(new Event('change'));
     document.querySelector('[name=requirement]').value = requirement;
     document.getElementById('folder-note').textContent = project.dirty ? t('dirty') : project.local_path;
   });
