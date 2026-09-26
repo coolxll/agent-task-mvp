@@ -1,5 +1,16 @@
 # MVP 验收记录（2026-09-25）
 
+## 2026-09-26 当前补充
+
+- Runner 已统一接入多个 Provider，并按节点上可执行的 CLI 报告 readiness；这个 readiness 只证明命令可发现和可启动，不保证认证、账号 entitlement 或服务端配额可用。Paseo 因结构化输出和会话生命周期尚未完成真实闭环，默认隐藏，仅可通过 `ENABLE_EXPERIMENTAL_PASEO=1` 在隔离环境启用。
+- 代码评审、Gate 或 Agent 验收失败会触发最多两轮自动修复，每轮重新执行独立评审、全部 Gate 和验收；验证轮次保存在 Artifact 中。
+- Runner watchdog 可恢复已经建立 worktree 且具有持久流水线状态的意外退出 Worker，最多自动恢复两次；无法证明安全的 provisioning 阶段退出会明确失败。集成测试包含真实 `SIGKILL` Worker 后续跑。
+- 当前完整回归为 **48 项测试通过**，并通过 Python 编译检查、`node --check ui.js` 与 `git diff --check`。
+- 隔离 Manager/Runner 使用真实 Codex 在 `coolxll/agent-task-mvp` 完成 [PR #17](https://github.com/coolxll/agent-task-mvp/pull/17) 的创建与系统内批准合并：审核 head `a4a5de1150ca05f6d2b8afb5a4c2114173341fcd`，目标 `main`，merge commit `506690980900df4723c45c76d688cdcf134dea16`；Run #2 最终为 `SUCCEEDED`、`delivery_status=merged`，worktree 已清理。branch protection 主动阻挡场景仍未实测，远端任务分支由验收后手工删除。详见 [GitHub 交付安全边界](github-delivery-security.zh-CN.md)。
+- Antigravity CLI `1.2.10` 的真实结构化 plan 探针在消耗 token 前被服务端拒绝，原因为当前账号不具备 Antigravity 资格。该结果是外部账号 entitlement 阻塞，不是本项目代码失败，也说明 CLI readiness 不能代表端到端可用。
+
+以下内容保留 2026-09-25 当时的验收过程和 Run 证据；其中“尚未实现”类表述应结合本节当前补充阅读。
+
 ## 本轮改动：全托管执行与交付验收
 
 用户反馈的“审核”现已明确为两个不同动作：远端工作流内的 **Agent 代码评审** 检查实现质量；末端的 **用户交付验收** 决定是否接受成果。GitHub 交付时，用户验收通过才合并 PR；本地分支交付时，成果分支已回 Mac，验收通过后保留它。拒绝会关闭已有 PR 并清理远端工作区。网页导航及按钮使用“交付验收”措辞。
@@ -16,7 +27,7 @@ Mac 和 `corp172-dev` 已切到项目 `.venv` 启动，远端检查 `pydantic.__
 
 **真实远端验收：**Task #10 / Run #11 在 `corp172-dev` 的隔离 worktree 运行真实 Codex。规划阶段提出“docstring 应该使用中文还是英文？”，Runner 保存 `NEEDS_INPUT`、问题和会话 ID；通过 Manager API 回答“英文”后，原规划会话续跑，进入实现阶段。这个 Run 在补充跨阶段回答上下文的修复过程中启动，所以实现阶段又重复问了一次；回答后继续完成实现、代码评审、Gate 和验收检查，结果 bundle 回传 Mac，`delivery_status=ready`。修复后的集成测试已验证后续阶段不再重复提问；真实远端对该修复的完整新 Run 尚未重新验证。
 
-Run #11 **不能批准**：仓库原始提交没有 `tests` 目录，配置的 unittest Gate 退出码为 1；Codex 添加的 docstring 还把实际执行减法的函数误写为“返回和”。独立代码评审与验收报告均为 `passed=false`，`ready_to_merge=false`，UI 禁止验收通过。该 Run 留在交付验收页保留失败证据，尚未作拒绝清理。当前工作流不会把评审或 Gate 失败自动送回 Agent 返工；这是后续全托管闭环需要补上的能力。
+Run #11 **不能批准**：仓库原始提交没有 `tests` 目录，配置的 unittest Gate 退出码为 1；Codex 添加的 docstring 还把实际执行减法的函数误写为“返回和”。独立代码评审与验收报告均为 `passed=false`，`ready_to_merge=false`，UI 禁止验收通过。该 Run 留在交付验收页保留失败证据，尚未作拒绝清理。在这次验收时，工作流还不会把评审或 Gate 失败自动送回 Agent 返工；该能力现已按本页 2026-09-26 补充实现。
 
 本记录对照[实施计划](implementation-plan.zh-CN.md)和[目标 MVP](target-mvp.zh-CN.md)，区分真实远端执行、本地集成验证与尚待真实 GitHub 仓库验收的环节。运行数据保存在 Mac 的 `manager.sqlite3` / `manager.sqlite3.data/` 和 `corp172-dev` 的 `/workspace/agent-task-mvp/data/`。Web 地址：<http://127.0.0.1:18765/zh>。
 
@@ -44,14 +55,14 @@ Run #9 曾因远端 Codex 供应端没有按 `--output-schema` 返回 JSON 而�
 
 1. 打开 <http://127.0.0.1:18765/zh>，在“交付验收”点击 Run #10“查看结果”。应看到两个步骤、评审通过、3 项 unittest 通过、验收证据，以及 Mac 上的结果仓库路径。
 2. 要自行提交新任务，在“任务”点击“选择文件夹…”，选择一个已提交的 Git 仓库，选择 `corp172-dev`，输入一段需求。也可选择已有 Project。
-3. 在“执行流程”观察阶段。`NEEDS_INPUT` 时打开 Run 回答问题继续；`FAILED` 应包含具体错误；`REVIEW` 应可查看完整结果。Code Review、Gate 或验收任何一项失败时，Approve 不可用，结果可 Reject 或检查后新建 Run。
-4. 若要验收 GitHub PR：选择你有写权限的 GitHub 项目，检查“配置”中的交付方式为 GitHub、目标分支正确；任务通过检查后确认出现 PR 链接；网页 Approve 后 PR 状态应为 `MERGED`，远端临时 worktree 应被清理。该项需要用户提供实际目标仓库，**目前未在外部 GitHub 仓库实测**。
+3. 在“执行流程”观察阶段。`NEEDS_INPUT` 时打开 Run 回答问题继续；`FAILED` 应包含具体错误；`REVIEW` 应可查看完整结果。Code Review、Gate 或验收任何一项失败时，系统最多自动修复两轮并完整复验；仍失败时 Approve 不可用，结果可 Reject 或检查后新建 Run。
+4. 若要验收 GitHub PR：选择你有写权限的 GitHub 项目，检查“配置”中的交付方式为 GitHub、目标分支正确；任务通过检查后确认出现 PR 链接；网页 Approve 后 PR 状态应为 `MERGED`，远端临时 worktree 应被清理。真实主路径已由 PR #17 验证；branch protection 主动拒绝路径仍需在配置了相应规则的仓库单独验收。
 
 ## 验证命令和结果
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m py_compile app.py agent_drivers.py control.py pipeline.py git_io.py
+.venv/bin/python -m py_compile app.py agent_drivers.py control.py pipeline.py git_io.py native_planner.py acp_bridge.py herdr_bridge.py
 node --check ui.js
 ```
 
@@ -60,6 +71,6 @@ node --check ui.js
 ## 已知边界
 
 - 一个任务选择一台执行机器；Planner 可在该机器拆成最多 8 个步骤。跨机器依赖执行和交接尚未实现。
-- GitHub PR 的推送/创建/合并逻辑已通过本地集成验证；真实 GitHub 仓库的权限、分支保护和合并策略仍需对具体项目验收。
+- GitHub PR 的推送、创建、head/base 复核、合并和 Runner 清理主路径已由 PR #17 真实验证；branch protection / required checks 主动阻挡路径仍需对具体项目验收。
 - 当前本机目录必须是干净 Git 仓库；Git bundle 限 48 MiB。非 Git 文件夹和未提交改动的快照传递未实现。
-- Runner worker 崩溃后的自动恢复尚未实现。`corp172-dev` 的 Codex 以 `danger-full-access` 运行，Git worktree 提供代码目录隔离，不提供操作系统级隔离。
+- Runner worker 已支持有界自动恢复，但 provisioning 阶段无法证明安全的退出会失败，恢复也不替代操作系统级隔离。`corp172-dev` 的 Codex 以 `danger-full-access` 运行，Git worktree 只提供代码目录隔离。
