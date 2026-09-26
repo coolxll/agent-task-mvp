@@ -80,6 +80,7 @@ class ProviderTests(unittest.TestCase):
                 self.assertIn("--conversation", call_args)
                 self.assertIn("conv-456", call_args)
                 self.assertIn("--json-schema", call_args)
+                handle.wait()
 
     def test_claude_driver_without_key_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,4 +178,3 @@ class ProviderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

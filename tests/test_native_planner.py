@@ -33,13 +33,14 @@ class NativePlannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(['git', 'init', '-q'], cwd=repo, check=True)
+            subprocess.run(['git', 'config', 'core.autocrlf', 'false'], cwd=repo, check=True)
             (repo / 'calc.py').write_text('def add(a,b): return a-b\n')
             subprocess.run(['git', 'add', '.'], cwd=repo, check=True)
             subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@local',
                             'commit', '-qm', 'fixture'], cwd=repo, check=True)
             seen = []
 
-            def model(messages, info):
+            async def model(messages, info):
                 seen.extend(tool.name for tool in info.function_tools)
                 return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args={
                     'summary': 'Fix add', 'steps': [{'id': 'fix', 'title': 'Fix add',
