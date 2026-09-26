@@ -94,12 +94,13 @@ def run(state, run_dir, workspace, driver, git, update, say, log, save):
         if completed:
             return completed['output']
         paused = next((x for x in artifacts['stages'] if x['name'] == stage and x['status'] == 'NEEDS_INPUT'), None)
+        interrupted = next((x for x in artifacts['stages'] if x['name'] == stage and x['status'] == 'RUNNING'), None)
         if paused and not state.get('answer'):
             raise NeedsInput(paused['question'])
         update(status='RUNNING', stage=stage)
         say('Stage: ' + stage)
-        record = paused or {'name': stage, 'status': 'RUNNING'}
-        if not paused:
+        record = paused or interrupted or {'name': stage, 'status': 'RUNNING'}
+        if not paused and not interrupted:
             artifacts['stages'].append(record)
         record['status'] = 'RUNNING'
         if paused:

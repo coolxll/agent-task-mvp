@@ -25,7 +25,7 @@ import git_io
 import pipeline
 
 FAKE_CODEX = '''#!/usr/bin/env python3
-import json,sys,time
+import json,os,signal,sys,time
 from pathlib import Path
 prompt=sys.stdin.read()
 output=Path(sys.argv[sys.argv.index('--output-last-message')+1])
@@ -46,6 +46,11 @@ elif 'implementing' in name:
         print(json.dumps({'type':'thread.started','thread_id':'fixture-session'}))
         sys.exit(0)
     if 'SLOW' in prompt: time.sleep(60)
+    crash_marker = output.parent / 'worker-crashed-once'
+    if 'CRASH_ONCE' in prompt and not crash_marker.exists():
+        crash_marker.write_text('crashed')
+        os.kill(os.getppid(), signal.SIGKILL)
+        sys.exit(0)
     operator = '-' if 'AUTO_REPAIR' in prompt else '+'
     Path('calculator.py').write_text('def add(a, b):\\n    return a ' + operator + ' b\\n')
     Path('test_calculator.py').write_text('import unittest\\nfrom calculator import add\\nclass TestAdd(unittest.TestCase):\\n    def test_add(self): self.assertEqual(add(2, 3), 5)\\n')
@@ -334,6 +339,19 @@ class WorkflowTests(unittest.TestCase):
         else: self.fail('Cancelled worker did not stop')
         self.assertEqual(result['status'],'CANCELLED')
         self.assertFalse(Path(result['workspace']).exists())
+
+    def test_04a_worker_crash_is_detected_and_resumed(self):
+        run_id=self.submit('Fix addition CRASH_ONCE')
+        run=self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['status'],'REVIEW',run)
+        self.assertEqual(run['artifacts']['pipeline_version'],2)
+        self.assertIsNone(run['error'])
+        runner_state=json.loads((self.root/'runner'/'runs'/str(run_id)/'state.json').read_text())
+        self.assertEqual(runner_state['recovery_attempts'],1)
+        self.assertIn('Recovering worker after unexpected exit',run['logs'])
+        implementing=[x for x in run['artifacts']['stages'] if x['name']=='IMPLEMENTING_1']
+        self.assertEqual(len(implementing),1)
+        self.api('/runs/%s/review'%run_id,{'decision':'reject'})
 
     def test_05_source_bundle_validation(self):
         value={'data':base64.b64encode(b'bad').decode(),'sha256':'wrong'}
