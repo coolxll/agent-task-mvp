@@ -46,9 +46,13 @@ elif 'implementing' in name:
         print(json.dumps({'type':'thread.started','thread_id':'fixture-session'}))
         sys.exit(0)
     if 'SLOW' in prompt: time.sleep(60)
-    Path('calculator.py').write_text('def add(a, b):\\n    return a + b\\n')
+    operator = '-' if 'AUTO_REPAIR' in prompt else '+'
+    Path('calculator.py').write_text('def add(a, b):\\n    return a ' + operator + ' b\\n')
     Path('test_calculator.py').write_text('import unittest\\nfrom calculator import add\\nclass TestAdd(unittest.TestCase):\\n    def test_add(self): self.assertEqual(add(2, 3), 5)\\n')
     value='Fixed addition and added test'
+elif 'repairing' in name:
+    Path('calculator.py').write_text('def add(a, b):\\n    # repaired after verification\\n    return a + b\\n')
+    value='Fixed the failing addition implementation reported by the gate'
 elif 'code_review' in name:
     value={'passed':True,'summary':'Checked diff','findings':[]}
 else:
@@ -198,11 +202,27 @@ class WorkflowTests(unittest.TestCase):
         run=self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
         self.assertEqual(run['status'],'REVIEW',run)
         self.assertFalse(run['artifacts']['ready_to_merge'])
+        self.assertEqual(len(run['artifacts']['verification_rounds']),3)
+        self.assertEqual([x['name'] for x in run['artifacts']['stages'] if x['name'].startswith('REPAIRING_')],
+                         ['REPAIRING_1','REPAIRING_2'])
         with self.assertRaisesRegex(ValueError,'must all pass'):
             self.api('/runs/%s/review'%run_id,{'decision':'approve'})
         result=self.api('/runs/%s/review'%run_id,{'decision':'reject'})
         self.assertEqual(result['status'],'REJECTED')
         self.assertFalse(Path(run['workspace']).exists())
+
+    def test_02c_failed_verification_is_repaired_and_rerun(self):
+        run_id=self.submit('Fix addition AUTO_REPAIR')
+        run=self.wait(run_id, lambda r:r['status']=='FAILED' or r['delivery_status'] in ('ready','failed'))
+        self.assertEqual(run['status'],'REVIEW',run)
+        art=run['artifacts']
+        self.assertTrue(art['ready_to_merge'])
+        self.assertEqual(len(art['verification_rounds']),2)
+        self.assertFalse(art['verification_rounds'][0]['passed'])
+        self.assertTrue(art['verification_rounds'][1]['passed'])
+        self.assertTrue(any(x['name']=='REPAIRING_1' for x in art['stages']))
+        self.assertIn('Repair round 1',art['agent_summary'])
+        self.api('/runs/%s/review'%run_id,{'decision':'reject'})
 
     def test_02a_agent_question_answer_resumes_same_run(self):
         run_id=self.submit('Fix addition ASK_USER')

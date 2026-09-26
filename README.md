@@ -23,6 +23,8 @@ The access setting is specific to the current `corp172-dev` container, which can
 
 Paseo remains experimental because its structured-result and session lifecycle have not passed the full remote workflow. It is hidden unless an isolated test Runner sets `ENABLE_EXPERIMENTAL_PASEO=1`. Full-access turns use Paseo's `full-access` mode and read-only turns use `auto-review`.
 
+If code review, a Gate, or Agent acceptance fails, the Runner sends the concrete findings and outputs to a repair turn and repeats independent review, all Gates, and acceptance. It performs at most two repair attempts and preserves every verification round in the Run artifacts.
+
 On the Mac, keep an SSH port forward running and start Manager:
 
 ```sh
