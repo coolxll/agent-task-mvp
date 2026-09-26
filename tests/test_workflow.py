@@ -237,7 +237,11 @@ class WorkflowTests(unittest.TestCase):
         finally: file.unlink()
 
     def test_03a_only_registered_agent_kinds_are_accepted(self):
-        self.assertEqual(self.api('/agents'), ['acp', 'antigravity', 'claude', 'codex', 'herdr', 'paseo', 'pi'])
+        self.assertEqual(self.api('/agents'), ['antigravity', 'acp', 'claude', 'codex', 'herdr', 'paseo', 'pi'])
+        node_agents = self.api('/nodes/%s/agents' % self.node)
+        self.assertIn('default_kind', node_agents)
+        codex = next(row for row in node_agents['agents'] if row['kind'] == 'codex')
+        self.assertTrue(codex['available'])
         with self.assertRaisesRegex(ValueError,'unsupported agent kind'):
             self.api('/submit',{'project_id':self.project,'node_id':self.node,
                                 'agent_kind':'unknown','requirement':'Fix addition'})

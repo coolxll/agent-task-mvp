@@ -28,6 +28,8 @@ class KanbanBoardTests(unittest.TestCase):
         self.assertIn('colReview', js)
         self.assertIn('colDone', js)
         self.assertIn('renderBoard', js)
+        self.assertIn('bindAgentAvailability', js)
+        self.assertIn("'/nodes/'", js)
         self.assertIn("current = 'board'", js)
         self.assertIn('new-task-dialog', js)
         self.assertIn('detail-modal', js)
