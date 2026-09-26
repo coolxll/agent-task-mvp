@@ -90,6 +90,10 @@ const stateName = value => L.taskState[value] || value;
 const stageName = value => {
   const names = zh ? {PLANNING:'调查与规划',CODE_REVIEW:'独立代码评审',TESTING:'执行测试',ACCEPTANCE:'验收检查'} : {};
   if (value?.startsWith('IMPLEMENTING_')) return (zh ? '实现步骤 ' : 'Implement step ') + value.split('_').pop();
+  if (value?.startsWith('REPAIRING_')) return (zh ? '自动修复轮次 ' : 'Repair round ') + value.split('_').pop();
+  if (value?.startsWith('CODE_REVIEW_')) return (zh ? '重新代码评审 ' : 'Repeat code review ') + value.split('_').pop();
+  if (value?.startsWith('TESTING_')) return (zh ? '重新执行测试 ' : 'Repeat tests ') + value.split('_').pop();
+  if (value?.startsWith('ACCEPTANCE_')) return (zh ? '重新验收检查 ' : 'Repeat acceptance ') + value.split('_').pop();
   return names[value] || stateName(value);
 };
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
