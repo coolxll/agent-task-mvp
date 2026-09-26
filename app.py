@@ -225,7 +225,11 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError):
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+        content = {"error": str(exc)}
+        kind = getattr(exc, 'kind', None)
+        if kind:
+            content["error_kind"] = kind
+        return JSONResponse(status_code=400, content=content)
 
     @app.exception_handler(KeyError)
     async def key_error_handler(request: Request, exc: KeyError):
@@ -256,7 +260,7 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
             return JSONResponse(status_code=400, content={"error": "request too large"})
         auth = request.headers.get("authorization")
         if auth != "Bearer " + token:
-            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+            return JSONResponse(status_code=401, content={"error": "unauthorized", "error_kind": "unauthorized"})
         return await call_next(request)
 
     @app.get("/health")
@@ -278,7 +282,7 @@ def create_runner_app(root: Path, token: str, agent_access: str = "workspace") -
         elif source_kind == "existing":
             source = Path(p["source_path"]).resolve(strict=True)
             if not source.is_dir() or git("rev-parse", "--show-toplevel", cwd=source).stdout.strip() != str(source):
-                raise ValueError("source_path must be a Git repository root")
+                raise CodedError("invalid_source_path", "source_path must be a Git repository root")
         else:
             raise ValueError("invalid source_kind")
         if any(x == "" for x in [p.get("title"), p.get("description")]):
@@ -473,8 +477,8 @@ def execute(root, run_id):
                             output = (result.stdout + result.stderr).replace(state["repo_url"] or "<no-remote>", "<repository>")
                             log.write(output)
                             if result.returncode:
-                                raise RuntimeError("Git clone failed (exit %s): %s" %
-                                                   (result.returncode, output[-2000:]))
+                                raise CodedError("git_clone_failed", "Git clone failed (exit %s): %s" %
+                                                 (result.returncode, output[-2000:]))
                             temp.rename(source)
                         finally:
                             if temp.exists():
@@ -488,7 +492,7 @@ def execute(root, run_id):
                             raise ValueError("managed workspace origin does not match Project repo_url")
                         fetched = git("fetch", "origin", "--prune", cwd=source, check=False)
                         if fetched.returncode:
-                            raise RuntimeError("Git fetch failed: %s" % fetched.stderr.replace(state["repo_url"] or "<no-remote>", "<repository>")[-2000:])
+                            raise CodedError("git_fetch_failed", "Git fetch failed: %s" % fetched.stderr.replace(state["repo_url"] or "<no-remote>", "<repository>")[-2000:])
                         ref = state["base_ref"]
                         if ref == "HEAD":
                             remote_head = git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=source, check=False)
@@ -515,7 +519,8 @@ def execute(root, run_id):
         except Exception as exc:
             say("ERROR: %s" % exc)
             if read_json(state_file)["status"] != "CANCELLED":
-                update(status="FAILED", error=str(exc), finished_at=now(), pid=None)
+                update(status="FAILED", error=str(exc), error_kind=getattr(exc, "kind", None),
+                       finished_at=now(), pid=None)
         finally:
             update_state(state_file, {"worker_pid": None, "pid": None})
 
@@ -553,7 +558,8 @@ def append_run_event(con, run_id, kind, data):
 def capture_run_events(con, run_id, old_status, old_stage, state, logs):
     if state['status'] != old_status or state.get('stage') != old_stage:
         append_run_event(con, run_id, 'status', {'status': state['status'],
-            'stage': state.get('stage'), 'error': state.get('error'), 'question': state.get('question')})
+            'stage': state.get('stage'), 'error': state.get('error'),
+            'error_kind': state.get('error_kind'), 'question': state.get('question')})
     cursor = con.execute('SELECT event_log_offset FROM runs WHERE id=?', (run_id,)).fetchone()[0]
     if cursor > len(logs):
         cursor = 0
@@ -573,6 +579,14 @@ def capture_run_events(con, run_id, old_status, old_stage, state, logs):
     con.execute('UPDATE runs SET event_log_offset=? WHERE id=?', (cursor + complete, run_id))
 
 
+class CodedError(ValueError):
+    """ValueError carrying a stable machine-readable kind for UI classification."""
+
+    def __init__(self, kind, detail):
+        super().__init__(detail)
+        self.kind = kind
+
+
 def runner_call(node, method, path, payload=None, timeout=10):
     request = urllib.request.Request(node["endpoint"].rstrip("/") + path,
         data=json.dumps(payload).encode() if payload is not None else None,
@@ -581,7 +595,16 @@ def runner_call(node, method, path, payload=None, timeout=10):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError("Runner HTTP %s: %s" % (exc.code, exc.read().decode()[:500])) from exc
+        body = exc.read().decode()[:500]
+        try:
+            detail = json.loads(body)
+            message = str(detail.get("error") or body)
+            kind = detail.get("error_kind")
+        except ValueError:
+            message, kind = body, None
+        if not kind and exc.code == 401:
+            kind = "unauthorized"
+        raise CodedError(kind, "Runner HTTP %s: %s" % (exc.code, message)) from exc
 
 
 class Manager:
@@ -611,7 +634,11 @@ def create_manager_app(db_path: Path) -> FastAPI:
 
     @app.exception_handler(ValueError)
     async def value_error_handler(request: Request, exc: ValueError):
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+        content = {"error": str(exc)}
+        kind = getattr(exc, 'kind', None)
+        if kind:
+            content["error_kind"] = kind
+        return JSONResponse(status_code=400, content=content)
 
     @app.exception_handler(KeyError)
     async def key_error_handler(request: Request, exc: KeyError):
@@ -948,7 +975,7 @@ def create_manager_app(db_path: Path) -> FastAPI:
             run = manager.row(con, "runs", run_id)
             if run["status"] != "REVIEW":
                 raise ValueError("Run is not ready for delivery")
-            con.execute("UPDATE runs SET delivery_status='pending',delivery_error=NULL WHERE id=? AND delivery_status='failed'", (run["id"],))
+            con.execute("UPDATE runs SET delivery_status='pending',delivery_error=NULL,delivery_error_kind=NULL WHERE id=? AND delivery_status='failed'", (run["id"],))
             return {"ok": True}
 
     @app.post("/api/runs/{run_id}/answer")
@@ -1025,8 +1052,8 @@ def poll(db_path):
                         current = con.execute("SELECT status,stage FROM runs WHERE id=?", (row["id"],)).fetchone()
                         if current["status"] in ("SUCCEEDED", "REJECTED", "CANCELLED"):
                             continue
-                        con.execute("UPDATE runs SET status=?,error=?,workspace=?,source_path=?,branch=?,agent_session_id=?,started_at=?,finished_at=?,artifacts=?,logs=?,updated_at=?,stage=?,commit_sha=?,question=? WHERE id=?",
-                            (state["status"], state.get("error"), state.get("workspace"), state.get("source_path"), state.get("branch"),
+                        con.execute("UPDATE runs SET status=?,error=?,error_kind=?,workspace=?,source_path=?,branch=?,agent_session_id=?,started_at=?,finished_at=?,artifacts=?,logs=?,updated_at=?,stage=?,commit_sha=?,question=? WHERE id=?",
+                            (state["status"], state.get("error"), state.get("error_kind"), state.get("workspace"), state.get("source_path"), state.get("branch"),
                              state.get("agent_session_id"), state.get("started_at"), state.get("finished_at"),
                              json.dumps(artifacts), logs, now(), state.get("stage"), state.get("commit_sha"), state.get("question"), row["id"]))
                         capture_run_events(con, row['id'], current['status'], current['stage'], state, logs)
@@ -1040,7 +1067,8 @@ def poll(db_path):
                         control.publish(con, db_path, row["id"], row)
                 except Exception as exc:
                     with con:
-                        con.execute("UPDATE runs SET error=?,updated_at=? WHERE id=?", ("Runner unavailable: " + str(exc), now(), row["id"]))
+                        con.execute("UPDATE runs SET error=?,error_kind=?,updated_at=? WHERE id=?",
+                                    ("Runner unavailable: " + str(exc), "runner_unavailable", now(), row["id"]))
             con.close()
         except Exception as exc:
             sys.stderr.write("poll error: %s\n" % exc)

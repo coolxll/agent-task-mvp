@@ -97,15 +97,20 @@ const stageName = value => {
   return names[value] || stateName(value);
 };
 const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-const errorName = value => {
+const errorKinds = {
+  runner_unavailable: '无法连接 Runner',
+  invalid_source_path: '路径必须是远端 Git 仓库根目录',
+  unauthorized: 'Runner token 无效',
+  git_clone_failed: '克隆仓库失败',
+  git_fetch_failed: '更新仓库失败',
+  merge_protection: '合并被分支保护规则拒绝，合并未完成，可重试验收',
+  merge_failed: 'PR 合并失败，可重试验收',
+  branch_delete_failed: 'PR 已合并，但删除远端任务分支失败，请重试验收以完成清理',
+};
+const errorName = (value, kind) => {
   const s = String(value || '');
   if (!zh) return s;
-  if (s.includes('source_path must be a Git repository root')) return '路径必须是远端 Git 仓库根目录：' + s;
-  if (s.includes('Runner unavailable')) return '无法连接 Runner：' + s;
-  if (s.includes('Git clone failed')) return '克隆仓库失败：' + s;
-  if (s.includes('Git fetch failed')) return '更新仓库失败：' + s;
-  if (s.includes('unauthorized')) return 'Runner token 无效：' + s;
-  return s;
+  return errorKinds[kind] ? errorKinds[kind] + '：' + s : s;
 };
 let current = 'board';
 let selectedRun = null;
@@ -118,7 +123,11 @@ async function api(path, method = 'GET', body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await response.json();
-  if (!response.ok) throw Error(data.error || String(response.status));
+  if (!response.ok) {
+    const error = Error(data.error || String(response.status));
+    if (data.error_kind) error.kind = data.error_kind;
+    throw error;
+  }
   return data;
 }
 
@@ -155,7 +164,7 @@ function bindAgentAvailability(nodeSelect, agentSelect, submitButton) {
       if (submitButton) submitButton.disabled = baseDisabled || !available.length;
     } catch (error) {
       if (currentRequest !== requestId) return;
-      agentSelect.innerHTML = `<option value="">${esc(errorName(error.message))}</option>`;
+      agentSelect.innerHTML = `<option value="">${esc(errorName(error.message, error.kind))}</option>`;
     }
   }
   nodeSelect.addEventListener('change', () => refresh());
@@ -177,7 +186,7 @@ async function show(view = current) {
     else renderBoard(app, data);
     if ((view === 'running' || view === 'review') && selectedRun) await details(selectedRun);
   } catch (error) {
-    document.getElementById('app').innerHTML = `<section class="bad">${esc(errorName(error.message))}</section>`;
+    document.getElementById('app').innerHTML = `<section class="bad">${esc(errorName(error.message, error.kind))}</section>`;
   }
 }
 
@@ -226,7 +235,7 @@ function renderBoard(app, {projects, nodes, workspaces, tasks, runs, agents}) {
     const stageBadge = run?.stage ? `<span class="badge badge-stage">${esc(stageName(run.stage))}</span>` : '';
     const statusBadge = run ? `<span class="badge ${run.status === 'NEEDS_INPUT' ? 'badge-blocked' : run.status === 'REVIEW' ? 'badge-review' : 'badge-node'}">${esc(stateName(run.status))}</span>` : `<span class="badge badge-done">${esc(stateName(task.status))}</span>`;
     const questionSnippet = run?.status === 'NEEDS_INPUT' && run.question ? `<p class="bad" style="font-size:12px;margin:3px 0;line-height:1.3"><strong>Q:</strong> ${esc(run.question.slice(0, 80))}${run.question.length > 80 ? '...' : ''}</p>` : '';
-    const errorSnippet = run?.error ? `<p class="bad" style="font-size:12px;margin:2px 0">${esc(errorName(run.error).slice(0, 60))}</p>` : '';
+    const errorSnippet = run?.error ? `<p class="bad" style="font-size:12px;margin:2px 0">${esc(errorName(run.error, run.error_kind).slice(0, 60))}</p>` : '';
     const descSnippet = task.description ? `<div class="card-desc">${esc(task.description)}</div>` : '';
 
     return `
@@ -559,7 +568,7 @@ function renderRunning(app, {runs, tasks, nodes}) {
   const rows = runs.filter(x => ['PENDING','PROVISIONING','RUNNING','VERIFYING','NEEDS_INPUT','FAILED','CANCELLED'].includes(x.status));
   app.innerHTML = `<section><h2>${t('running')}</h2><table><tbody>${rows.map(run => `
     <tr><td>#${run.id} ${esc(taskMap[run.task_id]?.title)}</td><td>${esc(nodeMap[run.node_id]?.name)} · ${esc(run.agent_kind)}</td>
-    <td>${esc(stageName(run.stage || run.status))} ${run.error ? `<span class="bad">${esc(errorName(run.error))}</span>` : ''}</td>
+    <td>${esc(stageName(run.stage || run.status))} ${run.error ? `<span class="bad">${esc(errorName(run.error, run.error_kind))}</span>` : ''}</td>
     <td><button data-detail="${run.id}">${t('logs')}</button>
     ${['PENDING','PROVISIONING','RUNNING','VERIFYING','NEEDS_INPUT'].includes(run.status) ? `<button data-cancel="${run.id}">${t('cancel')}</button>` : ''}
     ${['FAILED','CANCELLED'].includes(run.status) && !run.cleaned_at ? `<button data-cleanup="${run.id}">${t('cleanup')}</button>` : ''}</td></tr>`).join('')}</tbody></table></section><section id="detail"></section>`;
@@ -597,10 +606,10 @@ async function details(id) {
   selectedDeliveryPending = run.status === 'REVIEW' && ['pending','publishing'].includes(run.delivery_status);
   const ready = !art.pipeline_version || (art.ready_to_merge && ['ready','merged'].includes(run.delivery_status));
   const safePr = /^https:\/\/github\.com\//.test(run.pr_url || '') ? run.pr_url : '';
-  target.innerHTML = `<h2>${t('run')} #${id}</h2><p id="run-status">${esc(stageName(run.stage || run.status))} ${esc(errorName(run.error))}</p>
+  target.innerHTML = `<h2>${t('run')} #${id}</h2><p id="run-status">${esc(stageName(run.stage || run.status))} ${esc(errorName(run.error, run.error_kind))}</p>
     ${run.status === 'NEEDS_INPUT' ? `<form id="answer-form"><h3>${t('question')}</h3><p>${esc(run.question)}</p><textarea name="answer" required rows="5"></textarea><p><button>${t('answer')}</button></p></form>` : ''}
     <p>${t('sourceRepo')}: <code>${esc(run.source_path)}</code><br>${t('workspacePath')}: <code>${esc(run.workspace)}</code><br>${t('branch')}: <code>${esc(run.branch)}</code></p>
-    <h3>${t('delivery')}</h3><p>${esc(run.delivery_status)} <span class="bad">${esc(run.delivery_error)}</span></p>
+    <h3>${t('delivery')}</h3><p>${esc(run.delivery_status)} <span class="bad">${esc(errorName(run.delivery_error, run.delivery_error_kind))}</span></p>
     ${safePr ? `<p><a href="${esc(safePr)}" target="_blank" rel="noopener">${esc(safePr)}</a></p>` : ''}
     ${run.delivery_repo ? `<p>${t('returned')}: <code>${esc(run.delivery_repo)}</code></p>` : ''}
     ${run.delivery_status === 'failed' && run.status === 'REVIEW' ? `<button id="retry-delivery">${t('retryDelivery')}</button>` : ''}
@@ -638,6 +647,10 @@ async function details(id) {
         if (detailModal?.open) detailModal.close();
         await show(current);
       }
+      catch (error) {
+        alert(errorName(error.message, error.kind));
+        await details(id);
+      }
       finally { button.disabled = false; }
     };
   }
@@ -667,7 +680,7 @@ function openRunStream(id, after) {
     }
     if (item.kind === 'status') {
       const status = document.getElementById('run-status');
-      if (status) status.textContent = `${stageName(item.data.stage || item.data.status)} ${errorName(item.data.error)}`;
+      if (status) status.textContent = `${stageName(item.data.stage || item.data.status)} ${errorName(item.data.error, item.data.error_kind)}`;
       if (['NEEDS_INPUT','REVIEW','FAILED','SUCCEEDED','REJECTED','CANCELLED'].includes(item.data.status)) {
         if (!document.getElementById('detail-modal')?.open) show(current);
       }

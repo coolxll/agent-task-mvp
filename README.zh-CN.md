@@ -78,9 +78,9 @@ MANAGER_PLANNER_MODEL=pi:workbuddy-dffl/deepseek-v4.1-flash \
 
 项目设置可以配置 Gate 命令（每行一条）、PR 目标分支及交付方式。留空 Gate 时 Planner 提出测试命令；配置了 Gate 时系统按项目 Gate 执行。命令由 Runner 在 worktree 中执行，应只配置可信项目。新导入的本机目录默认选择本机合并；此前导入的 Project 会保留原交付设置，可在“配置”修改。PR 的目标分支默认取 Git 的 `origin/HEAD`；识别不到时使用当前分支，提交前应检查项目设置。
 
-远端只负责执行与产生结果。Manager 通过 Git bundle 导入 Mac 的 `manager.sqlite3.data/runs/<run-id>/result.git`；在 GitHub 方式下，用 Mac 的 Git/gh 推送任务分支并创建 PR，网页批准后以已审查的 commit SHA 合并。若 PR 分支被他人更新，审批会拒绝合并。GitHub 仓库保护规则仍会生效。失败的交付可在审核页重试。
+远端只负责执行与产生结果。Manager 通过 Git bundle 导入 Mac 的 `manager.sqlite3.data/runs/<run-id>/result.git`；在 GitHub 方式下，用 Mac 的 Git/gh 推送任务分支并创建 PR，网页批准后以已审查的 commit SHA 合并。若 PR 分支被他人更新，审批会拒绝合并。GitHub 仓库保护规则仍会生效：合并被保护规则拒绝时会显示友好错误并保持可重试，合并确认后系统自动删除自己创建的 `agent/task-` 远端任务分支。失败的交付可在审核页重试。
 
-真实 GitHub 主路径已由 [PR #17](https://github.com/coolxll/agent-task-mvp/pull/17) 验证：系统创建 PR、复核审核 head 与 `main`、通过 Run review API 批准并确认合并，最终 Run 为 `SUCCEEDED` 且 Runner worktree 已清理。该次没有触发 branch protection 拒绝；批准也不会自动删除 GitHub 远端任务分支。
+真实 GitHub 主路径已由 [PR #17](https://github.com/coolxll/agent-task-mvp/pull/17) 验证：系统创建 PR、复核审核 head 与 `main`、通过 Run review API 批准并确认合并，最终 Run 为 `SUCCEEDED` 且 Runner worktree 已清理。branch protection 拒绝处理与合并后远端任务分支自动删除已于 2026-09-26 在受保护测试仓库 `coolxll/agent-task-mvp-protect` 现场验收：拒绝时返回结构化 `merge_protection` 错误且保持可重试，放行后合并且远端任务分支被自动删除；开启 `delete_branch_on_merge` 的仓库返回"引用不存在"亦按成功处理。
 
 ## 数据与限制
 
